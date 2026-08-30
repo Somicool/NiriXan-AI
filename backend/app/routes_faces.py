@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Body, HTTPException
 
-from . import faces_gallery
+from . import face_enhance, faces_gallery
 
 router = APIRouter()
 
@@ -84,3 +84,13 @@ def delete_saved_face(saved_id: int):
 def similar_faces(saved_id: int, top_k: int = 60):
     """Find the same individual across all indexed footage (stored embedding)."""
     return faces_gallery.find_similar(saved_id, top_k=top_k)
+
+
+# --------------------------------------------------------- Face Enhancement
+# On-demand only. Nothing below is ever called during ingestion, and none of it
+# touches the saved_faces row - the result is separate derived evidence.
+@router.get("/faces/saved/{saved_id}/enhanced")
+def get_enhanced_face(saved_id: int):
+    """The stored derived visualisation for this saved face, if one exists."""
+    rec = face_enhance.get_enhanced(saved_id)
+    return rec or {"available": False}
