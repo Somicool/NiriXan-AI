@@ -282,6 +282,8 @@ CREATE TABLE IF NOT EXISTS enhanced_faces (
     label                  TEXT,
     created_at             TEXT
 );
+
+CREATE INDEX IF NOT EXISTS idx_enh_saved ON enhanced_faces(saved_face_id);
 CREATE INDEX IF NOT EXISTS idx_case_ev ON case_evidence(case_key, position);
 CREATE INDEX IF NOT EXISTS idx_det_camera ON detections(camera_id);
 CREATE INDEX IF NOT EXISTS idx_det_time   ON detections(timestamp);
