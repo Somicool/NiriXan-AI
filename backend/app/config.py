@@ -427,6 +427,16 @@ FACE_Q_W_NOISE = 0.04                        # image noise
 ENHANCED_FACE_DIR = DATA_DIR / "enhanced_faces"
 ENHANCED_FACE_DIR.mkdir(parents=True, exist_ok=True)
 
+# How much of the person's track to re-examine. Same budget as the best-face
+# scan, because it re-uses that exact scan order and frame reader.
+FACE_ENH_SCAN_FRAMES = 60
+# Frames actually fused. Beyond ~8 the median stops improving and only costs time.
+FACE_ENH_MAX_FRAMES = 8
+# Below this many surviving candidates the pipeline REFUSES. At 1 it will still
+# work from a single verified view (upscale + unsharp, no fusion) and says so; it
+# only refuses when the footage yields NO usable, identity-verified face at all.
+FACE_ENH_MIN_FRAMES = 1
+
 # ------------------------------------------------------------------
 # Processing modes: Fast (default, quick indexing/demos) vs Accurate
 # (full forensic pipeline). Every knob that differs between the two lives here,
