@@ -1184,3 +1184,24 @@ body {
 }
 .fe-tag.orig { background: rgba(6, 14, 20, .82); color: var(--fp-text-dim); border: 1px solid var(--fp-border); }
 .fe-tag.derived { background: var(--fp-accent); color: #04121a; }
+
+/* --- comparison slider --- */
+.fe-slider-wrap { max-width: 420px; }
+.fe-slider {
+  position: relative; width: 100%; aspect-ratio: 1/1; border-radius: 12px;
+  overflow: hidden; border: 1px solid var(--fp-accent); background: var(--fp-surface-2);
+}
+.fe-slider img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.fe-slider img.b { clip-path: inset(0 0 0 var(--split)); }
+.fe-handle {
+  position: absolute; top: 0; bottom: 0; left: var(--split); width: 2px;
+  background: var(--fp-accent); box-shadow: 0 0 8px var(--fp-accent);
+}
+.fe-lab {
+  position: absolute; bottom: 8px; font-size: 9.5px; font-weight: 700;
+  letter-spacing: .1em; padding: 3px 7px; border-radius: 999px;
+  background: rgba(6, 14, 20, .82); color: var(--fp-text-dim);
+}
+.fe-lab.l { left: 8px; }
+.fe-lab.r { right: 8px; color: var(--fp-accent); }
+.fe-slider-wrap input[type=range] { width: 100%; margin-top: 10px; accent-color: var(--fp-accent); }
