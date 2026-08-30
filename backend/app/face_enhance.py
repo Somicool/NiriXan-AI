@@ -331,3 +331,28 @@ def _upscale_sharpen(img, scale: int):
     sharp = cv2.addWeighted(up, 1.0 + config.FACE_ENH_UNSHARP,
                             blur, -config.FACE_ENH_UNSHARP, 0)
     return np.clip(sharp, 0, 255).astype("uint8")
+
+
+def _gfpgan_restore(img):
+    """Optional generative restoration, used ONLY if the package is importable.
+
+    Not installed here (basicsr needs torchvision.transforms.functional_tensor,
+    removed in torchvision 0.17+; this environment runs 0.20.1). Left wired so the
+    engine is a configuration choice rather than a rewrite. Returns None when
+    unavailable, and the caller falls back to fusion and records which ran."""
+    if config.FACE_ENH_MODEL not in ("gfpgan", "auto"):
+        return None, None
+    try:
+        from gfpgan import GFPGANer
+        weights = Path(config.FACE_ENH_GFPGAN_WEIGHTS)
+        if not weights.exists():
+            return None, None
+        restorer = GFPGANer(model_path=str(weights), upscale=config.FACE_ENH_SCALE,
+                            arch="clean", channel_multiplier=2, bg_upsampler=None)
+        _c, _r, out = restorer.enhance(img, has_aligned=True, only_center_face=True,
+                                       paste_back=False)
+        if out is None:
+            return None, None
+        return out, f"GFPGAN v1.4 (upscale x{config.FACE_ENH_SCALE})"
+    except Exception:
+        return None, None
