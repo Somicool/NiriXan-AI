@@ -419,6 +419,15 @@ FACE_Q_W_OCCL = 0.06                         # occlusion / truncation
 FACE_Q_W_NOISE = 0.04                        # image noise
 
 # ------------------------------------------------------------------
+# Face Enhancement (app/face_enhance.py) - ON-DEMAND derived visualisation.
+# Never runs during ingestion. The original saved face is never modified; the
+# result is written here as SEPARATE, additional evidence and labelled
+# "AI-Enhanced - Derived Visualisation".
+# ------------------------------------------------------------------
+ENHANCED_FACE_DIR = DATA_DIR / "enhanced_faces"
+ENHANCED_FACE_DIR.mkdir(parents=True, exist_ok=True)
+
+# ------------------------------------------------------------------
 # Processing modes: Fast (default, quick indexing/demos) vs Accurate
 # (full forensic pipeline). Every knob that differs between the two lives here,
 # so the single ingest_video() reads a preset instead of duplicating code.
