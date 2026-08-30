@@ -81,7 +81,7 @@ export default function FaceGallery() {
 
 /* ---------------------------- saved-face viewer ---------------------------- */
 function FaceViewer({ face, onClose, onDelete }) {
-  const [tab, setTab] = useState('view')          // view | similar
+  const [tab, setTab] = useState('view')          // view | enhance | similar
   const [sim, setSim] = useState(null)
   const [loading, setLoading] = useState(false)
   const [jump, setJump] = useState(null)          // similar result to play
@@ -112,6 +112,7 @@ function FaceViewer({ face, onClose, onDelete }) {
           </div>
           <div className="vi-head-actions">
             <button className={'fp-btn sm ' + (tab === 'view' ? 'primary' : '')} onClick={() => setTab('view')}>View Face</button>
+            <button className={'fp-btn sm ' + (tab === 'enhance' ? 'primary' : '')} onClick={() => setTab('enhance')}>Enhance Face</button>
             <button className={'fp-btn sm ' + (tab === 'similar' ? 'primary' : '')} onClick={findSimilar}>Find Similar Person</button>
             <button className="fp-btn sm" onClick={exportFace}>Export</button>
             <button className="fp-btn sm" onClick={() => onDelete(face.saved_id)} style={{ borderColor: 'var(--fp-danger)', color: '#ffb3bb' }}>Delete</button>
@@ -151,6 +152,8 @@ function FaceViewer({ face, onClose, onDelete }) {
                 {face.person_crop_url && <img className="fg-person" src={face.person_crop_url} alt="person profile" title="Person profile image" />}
               </div>
             </div>
+          ) : tab === 'enhance' ? (
+            <EnhancePanel face={face} />
           ) : (
             <div className="fg-similar">
               {loading ? <div className="vi-msg">Searching all indexed faces…</div>
