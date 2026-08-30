@@ -67,3 +67,28 @@ def _sha256(path) -> str | None:
 
 def _now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat()
+
+
+def _decode_emb(b64: str | None):
+    if not b64:
+        return None
+    try:
+        v = np.frombuffer(base64.b64decode(b64), dtype="float32")
+        n = float(np.linalg.norm(v))
+        return (v / n) if n > 0 else None
+    except Exception:
+        return None
+
+
+def _cosine(a, b) -> float:
+    try:
+        a = np.asarray(a, dtype="float32").ravel()
+        b = np.asarray(b, dtype="float32").ravel()
+        if a.size != b.size or a.size == 0:
+            return 0.0
+        na, nb = float(np.linalg.norm(a)), float(np.linalg.norm(b))
+        if na == 0 or nb == 0:
+            return 0.0
+        return float(np.dot(a, b) / (na * nb))
+    except Exception:
+        return 0.0
