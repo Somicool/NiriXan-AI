@@ -443,6 +443,19 @@ FACE_ENH_MIN_FRAMES = 1
 FACE_ENH_MIN_PX = 10
 FACE_ENH_MIN_QUALITY = 0.40                  # same bar as FACE_ACCEPT_QUALITY
 FACE_ENH_MIN_VISIBLE = 0.60                  # reject heavily occluded / truncated faces
+# Identity gate, MEASURED on this project's own footage rather than guessed.
+# The gate matters because the expanded person box regularly contains a bystander's
+# face, and fusing that in would blend two people.
+#
+# Running the collector with the gate disabled across all 13 usable saved faces,
+# the ArcFace cosines against the saved identity came out clearly bimodal, e.g.
+# saved face 8: 0.968 / 0.880 / 0.873 / 0.862 then 0.227 / 0.113 / 0.065 - the
+# high group is the tracked person across frames, the low group is other people
+# caught in the same expanded crop. Same-person second-best views across the set
+# ran 0.39-0.88; cross-person values sat at 0.30 and below.
+# 0.38 sits inside that gap. It is well under the 0.5 used for full-size faces
+# because at 10-25 px BOTH embeddings are noisy, so even a true match scores low.
+FACE_ENH_MIN_IDENTITY = 0.38
 
 # ------------------------------------------------------------------
 # Processing modes: Fast (default, quick indexing/demos) vs Accurate
