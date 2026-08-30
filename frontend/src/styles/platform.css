@@ -1157,3 +1157,30 @@ body {
 }
 .fe-busy { border-color: var(--fp-accent); color: var(--fp-text); }
 .fe-note { margin-top: 8px; font-size: 11.5px; }
+
+.fe-refuse {
+  border: 1px solid var(--fp-warn); border-radius: 10px; padding: 12px 14px;
+  background: color-mix(in srgb, var(--fp-warn) 10%, transparent);
+}
+.fe-refuse b { color: var(--fp-warn); font-size: 13.5px; }
+.fe-refuse-d { margin-top: 6px; font-size: 12px; line-height: 1.55; color: var(--fp-text-dim); }
+
+/* --- side-by-side --- */
+.fe-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.fe-pair figure { margin: 0; position: relative; }
+.fe-pair figcaption {
+  font-size: 10.5px; letter-spacing: .12em; font-weight: 700;
+  color: var(--fp-text-dim); margin-bottom: 6px;
+}
+.fe-pair img {
+  width: 100%; aspect-ratio: 1/1; object-fit: cover; border-radius: 12px;
+  background: var(--fp-surface-2); image-rendering: auto;
+}
+.fe-pair figure:first-child img { border: 1px solid var(--fp-border); }
+.fe-pair figure:last-child img { border: 1px solid var(--fp-accent); }
+.fe-tag {
+  position: absolute; left: 8px; bottom: 8px; font-size: 10px; font-weight: 700;
+  letter-spacing: .06em; padding: 4px 8px; border-radius: 999px;
+}
+.fe-tag.orig { background: rgba(6, 14, 20, .82); color: var(--fp-text-dim); border: 1px solid var(--fp-border); }
+.fe-tag.derived { background: var(--fp-accent); color: #04121a; }
