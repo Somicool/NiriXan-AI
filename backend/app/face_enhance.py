@@ -92,3 +92,12 @@ def _cosine(a, b) -> float:
         return float(np.dot(a, b) / (na * nb))
     except Exception:
         return 0.0
+
+
+def _sharpness(img) -> float:
+    """Variance of Laplacian - only compared between images of the SAME size."""
+    try:
+        g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+        return float(cv2.Laplacian(g, cv2.CV_64F).var())
+    except Exception:
+        return 0.0
