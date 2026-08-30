@@ -172,6 +172,13 @@ export async function findSimilarFaces(savedId, topK = 60) {
   return data
 }
 
+// ---- Face Enhancement (on-demand derived visualisation) ----
+// The result is EXTRA evidence: the original saved face is never modified.
+export async function getEnhancedFace(savedId) {
+  const { data } = await api.get(`/faces/saved/${savedId}/enhanced`)
+  return data
+}
+
 // ---- Camera Registry ----
 export async function listCameraRegistry() {
   const { data } = await api.get('/camera-registry')
