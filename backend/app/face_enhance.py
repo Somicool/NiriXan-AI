@@ -255,3 +255,31 @@ def _register(ref_gray, img):
                          flags=cv2.INTER_LANCZOS4 | cv2.WARP_INVERSE_MAP,
                          borderMode=cv2.BORDER_REPLICATE)
     return out, float(cc)
+
+
+def _fuse(aligned: list) -> tuple:
+    """Combine the verified views into one image.
+
+    Per-pixel MEDIAN, not mean: a median ignores a frame where a limb, another
+    head or a compression artefact crossed the face, where an average would smear
+    it in. Returns (image, mode, indices actually used, ECC correlations)."""
+    ref = aligned[0]
+    if len(aligned) == 1:
+        return ref.copy(), "single-frame", [0], [], None
+
+    ref_gray = cv2.GaussianBlur(
+        cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY).astype("float32"), (0, 0), 1.0)
+    stack, used, ccs = [ref.astype("float32")], [0], []
+    for i, img in enumerate(aligned[1:], start=1):
+        reg, cc = _register(ref_gray, img)
+        ccs.append(round(cc, 4))
+        if reg is None:
+            continue
+        stack.append(reg.astype("float32"))
+        used.append(i)
+
+    if len(stack) == 1:
+        return ref.copy(), "single-frame", used, ccs, None
+    arr = np.stack(stack, axis=0)
+    med = np.median(arr, axis=0)
+    return np.clip(med, 0, 255).astype("uint8"), "median", used, ccs, arr
