@@ -555,3 +555,28 @@ def enhance(saved_id: int, force: bool = False) -> dict:
     out = _row_out(stored)
     out["cached"] = False
     return out
+
+
+def list_enhanced(saved_id: int | None = None) -> list[dict]:
+    q = "SELECT * FROM enhanced_faces"
+    params: tuple = ()
+    if saved_id is not None:
+        q += " WHERE saved_face_id=?"
+        params = (int(saved_id),)
+    q += " ORDER BY id DESC"
+    with database.get_conn() as conn:
+        return [_row_out(dict(r)) for r in conn.execute(q, params).fetchall()]
+
+
+def delete_enhanced(enh_id: int) -> dict:
+    """Remove a derived visualisation. The saved face is never affected."""
+    with database.get_conn() as conn:
+        row = conn.execute("SELECT file_path FROM enhanced_faces WHERE id=?",
+                           (int(enh_id),)).fetchone()
+        conn.execute("DELETE FROM enhanced_faces WHERE id=?", (int(enh_id),))
+    try:
+        if row and row["file_path"] and str(config.ENHANCED_FACE_DIR) in str(row["file_path"]):
+            Path(row["file_path"]).unlink(missing_ok=True)
+    except Exception:
+        pass
+    return {"deleted": enh_id}
