@@ -457,6 +457,20 @@ FACE_ENH_MIN_VISIBLE = 0.60                  # reject heavily occluded / truncat
 # because at 10-25 px BOTH embeddings are noisy, so even a true match scores low.
 FACE_ENH_MIN_IDENTITY = 0.38
 
+FACE_ENH_ALIGN_SIZE = 224                    # canonical ArcFace alignment canvas
+# ECC correlation floor for the sub-pixel registration pass. A view that cannot be
+# registered to the reference this well is dropped rather than fused in - see the
+# measurement written up in face_enhance._register.
+FACE_ENH_MIN_ECC = 0.55
+FACE_ENH_SCALE = 2                           # output upscale factor
+FACE_ENH_UNSHARP = 0.5                       # unsharp strength (gentle on purpose)
+
+# "auto" uses GFPGAN when the package + weights are present, otherwise falls back
+# to multi-frame fusion. "fusion" forces fusion. See the module docstring for why
+# fusion is the default in this environment.
+FACE_ENH_MODEL = "auto"
+FACE_ENH_GFPGAN_WEIGHTS = str(DATA_DIR / "models" / "GFPGANv1.4.pth")
+
 # ------------------------------------------------------------------
 # Processing modes: Fast (default, quick indexing/demos) vs Accurate
 # (full forensic pipeline). Every knob that differs between the two lives here,
