@@ -318,3 +318,16 @@ def _noise_stats(arr) -> dict:
     if single > 0:
         out["noise_reduction_pct"] = round(100.0 * (single - fused) / single, 1)
     return out
+
+
+def _upscale_sharpen(img, scale: int):
+    """Upscale then apply a mild unsharp mask.
+
+    LANCZOS4 for the resize. The unsharp is deliberately gentle: it raises local
+    contrast on detail that is already present and cannot add features."""
+    h, w = img.shape[:2]
+    up = cv2.resize(img, (w * scale, h * scale), interpolation=cv2.INTER_LANCZOS4)
+    blur = cv2.GaussianBlur(up, (0, 0), sigmaX=1.1)
+    sharp = cv2.addWeighted(up, 1.0 + config.FACE_ENH_UNSHARP,
+                            blur, -config.FACE_ENH_UNSHARP, 0)
+    return np.clip(sharp, 0, 255).astype("uint8")
