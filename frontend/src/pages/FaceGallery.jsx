@@ -2,7 +2,7 @@
 // Reuses the existing InsightFace face index (no re-detection). Saved faces are
 // permanent (server-side) and only removed on explicit delete.
 import { useEffect, useMemo, useState } from 'react'
-import { listSavedFaces, deleteSavedFace, findSimilarFaces } from '../api'
+import { listSavedFaces, deleteSavedFace, findSimilarFaces, enhanceFace, getEnhancedFace } from '../api'
 import VideoPlayer from '../components/VideoPlayer'
 import TrackingViewer from '../components/TrackingViewer'
 import { IcFace, IcSearch } from '../components/icons'
@@ -199,6 +199,203 @@ function FaceViewer({ face, onClose, onDelete }) {
       {track && <TrackingViewer detection={{ detection_id: track.detection_id, class_label: 'person', camera_id: track.camera_id, attributes: {} }} onClose={() => setTrack(null)} />}
     </div>
   )
+}
+
+/* ------------------------- Face Enhancement (derived) -------------------------
+   The original saved crop stays on the left, untouched, at all times. The right
+   side is explicitly labelled a DERIVED visualisation and never presented as the
+   subject's real face. A refusal is shown as a result, not as an error. */
+function EnhancePanel({ face }) {
+  const [enh, setEnh] = useState(null)          // stored/produced result
+  const [busy, setBusy] = useState(false)
+  const [refusal, setRefusal] = useState(null)  // 422 payload from the backend
+  const [mode, setMode] = useState('side')      // side | slider
+  const [split, setSplit] = useState(50)
+  const [openFrames, setOpenFrames] = useState(false)
+  const [loaded, setLoaded] = useState(false)
+
+  const original = face.preview_crop_url || face.face_crop_url || face.person_crop_url
+
+  // Opening the tab only LOOKS for an existing result. Nothing is processed until
+  // the officer asks for it (on-demand requirement).
+  useEffect(() => {
+    let alive = true
+    getEnhancedFace(face.saved_id)
+      .then((r) => { if (alive) setEnh(r?.available ? r : null) })
+      .catch(() => {})
+      .finally(() => { if (alive) setLoaded(true) })
+    return () => { alive = false }
+  }, [face.saved_id])
+
+  async function run(force) {
+    setBusy(true); setRefusal(null)
+    const r = await enhanceFace(face.saved_id, force)
+    if (r.ok) { setEnh(r.data); setOpenFrames(false) } else { setRefusal(r.detail); setEnh(null) }
+    setBusy(false)
+  }
+
+  function saveEnhanced() {
+    // The result is already stored server-side; this takes a local copy of the
+    // derived image plus its full provenance record.
+    const rec = { ...enh }; delete rec._aligned
+    const blob = new Blob([JSON.stringify(rec, null, 2)], { type: 'application/json' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob); a.download = `enhanced_face_${face.saved_id}.json`; a.click()
+    if (enh.enhanced_url) window.open(enh.enhanced_url, '_blank')
+  }
+
+  const m = enh?.metrics || {}
+
+  return (
+    <div className="fe-wrap">
+      <div className="fe-actions">
+        <button className="fp-btn sm primary" onClick={() => run(false)} disabled={busy}>
+          {busy ? 'Analysing source footage…' : enh ? 'Re-run Enhancement' : 'Enhance Face'}
+        </button>
+        {enh && <button className="fp-btn sm" onClick={() => run(true)} disabled={busy}>Force Re-enhance</button>}
+        {enh && <button className="fp-btn sm" onClick={saveEnhanced}>Save Enhanced Face</button>}
+        {original && <button className="fp-btn sm" onClick={() => window.open(original, '_blank')}>View Source</button>}
+        {enh && (
+          <button className="fp-btn sm" onClick={() => setMode(mode === 'side' ? 'slider' : 'side')}>
+            {mode === 'side' ? 'Compare with slider' : 'Side by side'}
+          </button>
+        )}
+      </div>
+
+      {busy && (
+        <div className="fe-busy">
+          Re-opening the original recording, collecting every face on this person's
+          track, verifying each against the saved identity and fusing the best views.
+          This takes a few seconds and is not run during ingestion.
+        </div>
+      )}
+
+      {refusal && (
+        <div className="fe-refuse">
+          <b>{refusal.error}</b>
+          <div className="fe-refuse-d">
+            {refusal.reason ? <>Reason: {refusal.reason}. </> : null}
+            Frames analysed {refusal.frames_analysed ?? 0}, faces found {refusal.faces_found ?? 0},
+            passed verification {refusal.frames_selected ?? 0}.
+            {refusal.rejected && (
+              <> Rejected — too small {refusal.rejected.size ?? 0}, occluded {refusal.rejected.occluded ?? 0},
+                low quality {refusal.rejected.quality ?? 0}, identity mismatch {refusal.rejected.identity ?? 0}.</>
+            )}
+            <div style={{ marginTop: 6 }}>No image is produced when the footage does not contain
+              enough facial information — a fabricated face would not be evidence.</div>
+          </div>
+        </div>
+      )}
+
+      {!enh && !busy && !refusal && (
+        <div className="fe-intro">
+          {loaded ? <>This does not sharpen the stored crop. It goes back to the original
+            recording, gathers every face belonging to this tracked person, rejects blurred,
+            tiny, occluded and identity-mismatched views, then fuses the survivors.</>
+            : 'Checking for an existing enhancement…'}
+        </div>
+      )}
+
+      {enh && (
+        <>
+          {mode === 'side' ? (
+            <div className="fe-pair">
+              <figure>
+                <figcaption>ORIGINAL</figcaption>
+                <img src={original} alt="original saved face" />
+                <span className="fe-tag orig">Unmodified evidence</span>
+              </figure>
+              <figure>
+                <figcaption>AI-ENHANCED</figcaption>
+                <img src={enh.enhanced_url} alt="enhanced derived visualisation" />
+                <span className="fe-tag derived">{enh.label}</span>
+              </figure>
+            </div>
+          ) : (
+            <div className="fe-slider-wrap">
+              <div className="fe-slider" style={{ '--split': split + '%' }}>
+                <img className="a" src={original} alt="original saved face" />
+                <img className="b" src={enh.enhanced_url} alt="enhanced derived visualisation" />
+                <span className="fe-handle" />
+                <span className="fe-lab l">ORIGINAL</span>
+                <span className="fe-lab r">AI-ENHANCED</span>
+              </div>
+              <input type="range" min="0" max="100" value={split} aria-label="Compare original and enhanced"
+                     onChange={(e) => setSplit(Number(e.target.value))} />
+              <div className="fe-tag derived" style={{ position: 'static', marginTop: 8 }}>{enh.label}</div>
+            </div>
+          )}
+
+          <div className="fe-panel">
+            <div className="vi-group-h">Enhancement summary</div>
+            <InfoRow k="Source quality" v={<QualityPill q={enh.source_quality} px={m.source_face_px} />} />
+            <InfoRow k="Frames analysed" v={enh.frames_analysed ?? '—'} />
+            <InfoRow k="Faces found on track" v={m.faces_found ?? '—'} />
+            <InfoRow k="Frames selected" v={`${enh.frames_selected ?? '—'}${m.dropped_registration ? ` (${m.dropped_registration} dropped in alignment)` : ''}`} />
+            <InfoRow k="Best source timestamp" v={fmtTs(enh.best_source_timestamp)} />
+            <InfoRow k="Enhancement method" v={enh.model_name || '—'} />
+            <InfoRow k="Status" v={<span className="fe-status">Derived AI Enhancement</span>} />
+            <InfoRow k="Face resolution" v={`${m.source_face_px ?? '?'} px source → ${m.output_px ?? '?'} px output`} />
+            <InfoRow k="Identity agreement" v={m.identity_min != null ? `${m.identity_min.toFixed(2)} – ${m.identity_max.toFixed(2)} cosine` : '—'} />
+            <InfoRow k="Processing time" v={m.elapsed_s != null ? `${m.elapsed_s} s` : '—'} />
+
+            <div className="vi-group-h" style={{ marginTop: 14 }}>Measured effect</div>
+            {m.noise_reduction_pct != null ? (
+              <>
+                <InfoRow k="Noise, single frame" v={`${m.noise_single_frame} grey levels`} />
+                <InfoRow k="Noise after fusion" v={`${m.noise_fused_halfsplit} grey levels`} />
+                <InfoRow k="Noise reduction" v={<b style={{ color: 'var(--fp-success)' }}>{m.noise_reduction_pct}%</b>} />
+              </>
+            ) : (
+              <div className="fe-note">Too few verified views on this track to measure noise
+                reduction, so no figure is claimed.</div>
+            )}
+            <InfoRow k="Sharpness" v={`${m.sharpness_best_frame} → ${m.sharpness_enhanced} (variance of Laplacian)`} />
+            {m.note && <div className="fe-note">{m.note}</div>}
+
+            <div className="vi-group-h" style={{ marginTop: 14 }}>Chain of custody</div>
+            <InfoRow k="Source video" v={enh.source_video_id != null ? `video #${enh.source_video_id}` : '—'} />
+            <InfoRow k="Source track" v={enh.source_track_id != null ? `track ${enh.source_track_id}` : '—'} />
+            <InfoRow k="Source camera" v={enh.source_camera_id || '—'} />
+            <InfoRow k="Original SHA-256" v={<code className="fe-hash">{enh.original_hash || 'original file not on disk'}</code>} />
+            <InfoRow k="Enhanced SHA-256" v={<code className="fe-hash">{enh.enhanced_hash || '—'}</code>} />
+            <InfoRow k="Enhanced at" v={fmtDate(enh.created_at)} />
+
+            <button className="fe-frames-h" onClick={() => setOpenFrames(!openFrames)}>
+              {openFrames ? '▾' : '▸'} Source Frames Used ({(enh.source_frames || []).length})
+            </button>
+            {openFrames && (
+              <div className="fe-frames">
+                {(enh.source_frames || []).map((f, i) => (
+                  <div className="fe-frame" key={f.detection_id + '-' + i}>
+                    <img src={f.url} alt={`source frame ${f.frame_number}`} />
+                    <div className="fe-frame-m">
+                      <b>Frame {f.frame_number}</b>
+                      <span className="mono">{fmtTs(f.timestamp)}</span>
+                      <span>Quality {Math.round((f.quality || 0) * 100)} · {f.face_size} px</span>
+                      <span>Identity {f.identity != null ? f.identity.toFixed(2) : '—'} · conf {f.det_score}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="fe-warn">
+            ⚠ This image is a <b>derived visualisation</b>, not a photograph of the subject.
+            It is reconstructed from {enh.frames_selected} verified view{enh.frames_selected === 1 ? '' : 's'} of
+            a {m.source_face_px}&nbsp;px face. Treat it as an investigative aid, never as
+            identification on its own. The original crop above it is unaltered.
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function QualityPill({ q, px }) {
+  const col = q === 'High' ? 'var(--fp-success)' : q === 'Medium' ? 'var(--fp-warn)' : '#ff8a94'
+  return <span><b style={{ color: col }}>{q || '—'}</b>{px ? <span className="fe-dim"> · {px} px face in source</span> : null}</span>
 }
 
 function InfoRow({ k, v }) {
