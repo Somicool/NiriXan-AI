@@ -283,3 +283,38 @@ def _fuse(aligned: list) -> tuple:
     arr = np.stack(stack, axis=0)
     med = np.median(arr, axis=0)
     return np.clip(med, 0, 255).astype("uint8"), "median", used, ccs, arr
+
+
+def _noise_stats(arr) -> dict:
+    """Measure what the multi-frame step actually did to the noise.
+
+    Deliberately NOT a median-residual reading of the output image. That measures
+    high-frequency CONTENT, and both recovered detail and alignment ghosting raise
+    it, so it cannot answer the question - it was tried first and reported fusion
+    as worse on every track while sharpness simultaneously improved, which is the
+    signature of a metric measuring the wrong thing.
+
+    This is a half-split estimate instead, which needs no ground truth:
+      - two frames differ by (noise_i - noise_j), so std(difference)/sqrt(2)
+        estimates the noise in ONE frame
+      - split the stack in half, median each half, and the same construction on the
+        two half-medians estimates the noise left in a median of k/2 frames
+    The output actually uses all k frames, so the reported reduction is a
+    conservative floor. Residual misalignment inflates both terms, which keeps this
+    an honest upper bound on the noise rather than a flattering one."""
+    k = arr.shape[0]
+    if k < 4:
+        return {}
+    g = arr.mean(axis=3) if arr.ndim == 4 else arr
+    pairs = [float(np.std(g[i] - g[i + 1]) / np.sqrt(2.0)) for i in range(k - 1)]
+    single = float(np.mean(pairs))
+    a = np.median(g[0::2], axis=0)
+    b = np.median(g[1::2], axis=0)
+    fused = float(np.std(a - b) / np.sqrt(2.0))
+    out = {"temporal_sigma": round(float(np.mean(np.std(g, axis=0))), 3),
+           "noise_single_frame": round(single, 3),
+           "noise_fused_halfsplit": round(fused, 3),
+           "noise_halves": k // 2}
+    if single > 0:
+        out["noise_reduction_pct"] = round(100.0 * (single - fused) / single, 1)
+    return out
