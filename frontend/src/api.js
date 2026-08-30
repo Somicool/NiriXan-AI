@@ -179,6 +179,19 @@ export async function getEnhancedFace(savedId) {
   return data
 }
 
+// Returns { ok: true, data } or { ok: false, detail } — a refusal ("insufficient
+// facial evidence") is a legitimate 422 outcome, not a crash, so it is handed
+// back to the caller to display rather than thrown.
+export async function enhanceFace(savedId, force = false) {
+  try {
+    const { data } = await api.post(`/faces/saved/${savedId}/enhance`, { force })
+    return { ok: true, data }
+  } catch (e) {
+    const d = e?.response?.data?.detail
+    return { ok: false, detail: typeof d === 'object' ? d : { error: d || 'Enhancement failed.' } }
+  }
+}
+
 // ---- Camera Registry ----
 export async function listCameraRegistry() {
   const { data } = await api.get('/camera-registry')
