@@ -437,6 +437,13 @@ FACE_ENH_MAX_FRAMES = 8
 # only refuses when the footage yields NO usable, identity-verified face at all.
 FACE_ENH_MIN_FRAMES = 1
 
+# --- candidate rejection gates ---
+# Faces in this footage measure 10-25 px, so the size floor has to sit where a
+# face still carries information rather than at a textbook value.
+FACE_ENH_MIN_PX = 10
+FACE_ENH_MIN_QUALITY = 0.40                  # same bar as FACE_ACCEPT_QUALITY
+FACE_ENH_MIN_VISIBLE = 0.60                  # reject heavily occluded / truncated faces
+
 # ------------------------------------------------------------------
 # Processing modes: Fast (default, quick indexing/demos) vs Accurate
 # (full forensic pipeline). Every knob that differs between the two lives here,
