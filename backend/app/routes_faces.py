@@ -94,3 +94,20 @@ def get_enhanced_face(saved_id: int):
     """The stored derived visualisation for this saved face, if one exists."""
     rec = face_enhance.get_enhanced(saved_id)
     return rec or {"available": False}
+
+
+@router.post("/faces/saved/{saved_id}/enhance")
+def enhance_face(saved_id: int, payload: dict = Body(default={})):
+    """Build (or return the cached) AI-enhanced derived visualisation.
+
+    Goes back to the ORIGINAL recording, collects every face of that tracked
+    person, verifies each against the saved identity, keeps the best views and
+    fuses them. Refuses with 422 when the footage does not contain enough usable
+    facial evidence, rather than inventing a face.
+
+    `force: true` re-runs the pipeline instead of serving the cached result."""
+    rec = face_enhance.enhance(int(saved_id), force=bool((payload or {}).get("force")))
+    if rec.get("error"):
+        status = 404 if "not found" in rec["error"].lower() else 422
+        raise HTTPException(status_code=status, detail=rec)
+    return rec
