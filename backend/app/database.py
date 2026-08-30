@@ -256,6 +256,32 @@ CREATE TABLE IF NOT EXISTS case_reports (
     file_path     TEXT
 );
 
+-- Face Enhancement: DERIVED visualisations built on demand from several verified
+-- views of the same tracked person (see app/face_enhance.py). Purely additive -
+-- the saved_faces row it points at is never modified, and both the original and
+-- the derived image are hashed so the chain of custody stays checkable.
+CREATE TABLE IF NOT EXISTS enhanced_faces (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    saved_face_id          INTEGER,
+    source_video_id        INTEGER,
+    source_track_id        INTEGER,
+    source_camera_id       TEXT,
+    original_detection_ids TEXT,   -- JSON list of the detections fused
+    source_timestamps      TEXT,   -- JSON list, one per fused frame
+    best_source_timestamp  TEXT,
+    model_name             TEXT,   -- exactly which engine produced this
+    frames_analysed        INTEGER,
+    frames_selected        INTEGER,
+    quality_score          REAL,
+    source_quality         TEXT,   -- High | Medium | Low
+    original_hash          TEXT,   -- SHA-256 of the untouched saved face crop
+    enhanced_hash          TEXT,   -- SHA-256 of the derived image
+    file_path              TEXT,
+    source_frames          TEXT,   -- JSON: per-frame evidence behind the result
+    metrics                TEXT,   -- JSON: before/after measurements
+    label                  TEXT,
+    created_at             TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_case_ev ON case_evidence(case_key, position);
 CREATE INDEX IF NOT EXISTS idx_det_camera ON detections(camera_id);
 CREATE INDEX IF NOT EXISTS idx_det_time   ON detections(timestamp);
