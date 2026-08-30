@@ -51,3 +51,19 @@ import cv2
 import numpy as np
 
 from . import config, database, faces_gallery
+
+
+# --------------------------------------------------------------- small helpers
+def _sha256(path) -> str | None:
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat()
