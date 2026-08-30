@@ -111,3 +111,9 @@ def enhance_face(saved_id: int, payload: dict = Body(default={})):
         status = 404 if "not found" in rec["error"].lower() else 422
         raise HTTPException(status_code=status, detail=rec)
     return rec
+
+
+@router.delete("/faces/enhanced/{enh_id}")
+def delete_enhanced_face(enh_id: int):
+    """Discard a derived visualisation. The original saved face is untouched."""
+    return face_enhance.delete_enhanced(enh_id)
