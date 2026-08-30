@@ -101,3 +101,29 @@ def _sharpness(img) -> float:
         return float(cv2.Laplacian(g, cv2.CV_64F).var())
     except Exception:
         return 0.0
+
+
+# --------------------------------------------------------- candidate gathering
+def _align(crop, kps, size: int):
+    """Warp a face onto the canonical ArcFace geometry.
+
+    Uses insightface's own landmark transform (already a dependency) so every
+    candidate lands in the same coordinate frame - that is what makes fusing them
+    meaningful. LANCZOS4 instead of the library default because these faces are
+    being scaled UP by a large factor and the interpolation quality matters."""
+    try:
+        from insightface.utils import face_align
+        kps = np.asarray(kps, dtype="float32")
+        if kps.shape != (5, 2):
+            return None
+        # insightface changed this return value between versions: older builds
+        # return (matrix, pose_index), 1.0.1 returns the 2x3 matrix on its own.
+        # Unpacking blindly silently produced two 1-D rows and every warp failed.
+        est = face_align.estimate_norm(kps, size)
+        M = np.asarray(est[0] if isinstance(est, tuple) else est, dtype="float32")
+        if M.shape != (2, 3):
+            return None
+        return cv2.warpAffine(crop, M, (size, size), flags=cv2.INTER_LANCZOS4,
+                              borderMode=cv2.BORDER_REPLICATE)
+    except Exception:
+        return None
