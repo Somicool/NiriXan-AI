@@ -356,3 +356,29 @@ def _gfpgan_restore(img):
         return out, f"GFPGAN v1.4 (upscale x{config.FACE_ENH_SCALE})"
     except Exception:
         return None, None
+
+
+# ------------------------------------------------------------------ public API
+def get_enhanced(saved_id: int) -> dict | None:
+    """The stored enhancement for a saved face, if one was already produced."""
+    with database.get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM enhanced_faces WHERE saved_face_id=? "
+            "ORDER BY id DESC LIMIT 1", (int(saved_id),)).fetchone()
+    return _row_out(dict(row)) if row else None
+
+
+def _row_out(r: dict) -> dict:
+    from .search.text_search import media_url
+    for key in ("source_frames", "metrics"):
+        if r.get(key):
+            try:
+                r[key] = json.loads(r[key])
+            except (TypeError, ValueError):
+                r[key] = None
+    r["enhanced_url"] = media_url(r.get("file_path"))
+    r["available"] = bool(r.get("file_path") and Path(r["file_path"]).exists())
+    for fr in (r.get("source_frames") or []):
+        if fr.get("path"):
+            fr["url"] = media_url(fr["path"])
+    return r
