@@ -1205,3 +1205,37 @@ body {
 .fe-lab.l { left: 8px; }
 .fe-lab.r { right: 8px; color: var(--fp-accent); }
 .fe-slider-wrap input[type=range] { width: 100%; margin-top: 10px; accent-color: var(--fp-accent); }
+
+/* --- provenance panel --- */
+.fe-panel {
+  border: 1px solid var(--fp-border); border-radius: 12px; padding: 14px;
+  background: var(--fp-surface-2);
+}
+.fe-status { color: var(--fp-accent); font-weight: 700; }
+.fe-dim { color: var(--fp-text-dim); font-weight: 400; }
+.fe-hash { font-size: 10.5px; word-break: break-all; color: var(--fp-text-dim); }
+
+.fe-frames-h {
+  margin-top: 14px; width: 100%; text-align: left; cursor: pointer;
+  background: transparent; border: 1px dashed var(--fp-border); border-radius: 9px;
+  padding: 9px 11px; color: var(--fp-text); font-size: 12px; font-weight: 600;
+}
+.fe-frames-h:hover { border-color: var(--fp-accent); color: var(--fp-accent); }
+.fe-frames {
+  margin-top: 10px; display: grid; gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+}
+.fe-frame { border: 1px solid var(--fp-border); border-radius: 10px; overflow: hidden; }
+.fe-frame img { width: 100%; aspect-ratio: 1/1; object-fit: cover; display: block; }
+.fe-frame-m { padding: 7px 8px; display: flex; flex-direction: column; gap: 2px; font-size: 10.5px; color: var(--fp-text-dim); }
+.fe-frame-m b { color: var(--fp-text); font-size: 11px; }
+
+.fe-warn {
+  border: 1px solid var(--fp-warn); border-left-width: 3px; border-radius: 10px;
+  padding: 11px 13px; font-size: 12px; line-height: 1.6; color: var(--fp-text-dim);
+  background: color-mix(in srgb, var(--fp-warn) 8%, transparent);
+}
+
+@media (max-width: 780px) {
+  .fe-pair { grid-template-columns: 1fr; }
+}
