@@ -127,3 +127,98 @@ def _align(crop, kps, size: int):
                               borderMode=cv2.BORDER_REPLICATE)
     except Exception:
         return None
+
+
+def collect_candidates(video_id, track_id, ref_emb, max_frames=None) -> dict:
+    """Every usable face of this tracked person, scored and identity-checked.
+
+    Reuses the EXISTING scan order, frame reader, face detector and 9-factor
+    quality scorer from faces_gallery - this adds only the identity check and the
+    canonical alignment. Nothing about best-face selection or saving is changed."""
+    out = {"candidates": [], "frames_seen": 0, "faces_seen": 0,
+           "rejected": {"quality": 0, "size": 0, "occluded": 0, "identity": 0, "align": 0},
+           "reason": None, "video_path": None}
+    if video_id is None or track_id is None:
+        out["reason"] = "the saved face is not linked to a tracked person"
+        return out
+
+    max_frames = max_frames or config.FACE_ENH_SCAN_FRAMES
+    with database.get_conn() as conn:
+        dets = [dict(r) for r in conn.execute(
+            "SELECT * FROM detections WHERE video_id=? AND track_id=? AND class_label!='scene'",
+            (video_id, track_id)).fetchall()]
+    if not dets:
+        out["reason"] = "no stored detections for this person's track"
+        return out
+
+    vpath = faces_gallery.source_video_path(video_id)
+    if vpath is None:
+        out["reason"] = "the original recording is no longer on disk"
+        return out
+    out["video_path"] = str(vpath)
+
+    # even coverage across the whole track, largest boxes always included
+    cands = sorted(faces_gallery._scan_order(dets, max_frames),
+                   key=lambda d: (d.get("frame_number") or 0))
+    reader = faces_gallery._FrameReader(vpath)
+    if not reader.ok:
+        reader.close()
+        out["reason"] = "the original recording could not be opened"
+        return out
+
+    try:
+        for d in cands:
+            frame = reader.read(d.get("frame_number"))
+            if frame is None:
+                continue
+            crop, _off = faces_gallery._expanded_from_full_frame(frame, d)
+            if crop is None or not crop.size:
+                continue
+            out["frames_seen"] += 1
+            for f in faces_gallery._detect_faces_kps(crop):
+                if float(f.det_score) < config.FACE_MIN_DET_SCORE:
+                    continue
+                out["faces_seen"] += 1
+                m = faces_gallery._face_quality(f, crop)
+
+                # --- quality gates (reject poor views) ---
+                if m["face_size"] < config.FACE_ENH_MIN_PX:
+                    out["rejected"]["size"] += 1
+                    continue
+                if m["occlusion"] < config.FACE_ENH_MIN_VISIBLE:
+                    out["rejected"]["occluded"] += 1
+                    continue
+                if m["quality"] < config.FACE_ENH_MIN_QUALITY:
+                    out["rejected"]["quality"] += 1
+                    continue
+
+                # --- identity gate: this must be the SAME person ---
+                emb = getattr(f, "normed_embedding", None)
+                sim = _cosine(ref_emb, emb) if (ref_emb is not None and emb is not None) else None
+                if ref_emb is not None:
+                    if sim is None or sim < config.FACE_ENH_MIN_IDENTITY:
+                        out["rejected"]["identity"] += 1
+                        continue
+
+                aligned = _align(crop, f.kps, config.FACE_ENH_ALIGN_SIZE)
+                if aligned is None or not aligned.size:
+                    out["rejected"]["align"] += 1
+                    continue
+
+                out["candidates"].append({
+                    "detection_id": d["detection_id"],
+                    "frame_number": d.get("frame_number"),
+                    "timestamp": d.get("timestamp"),
+                    "quality": m["quality"], "face_size": m["face_size"],
+                    "sharpness": m["sharpness"], "frontal": m["frontal"],
+                    "brightness": m["brightness"], "occlusion": m["occlusion"],
+                    "det_score": m["det_score"], "resolution": m["resolution"],
+                    "identity": round(sim, 4) if sim is not None else None,
+                    "_aligned": aligned,
+                })
+    finally:
+        reader.close()
+
+    # best first: quality, then how much it looks like the saved identity
+    out["candidates"].sort(key=lambda c: (c["quality"], c["identity"] or 0), reverse=True)
+    return out
