@@ -22,8 +22,12 @@ backend/data/exports/
 backend/data/plate_crops/
 backend/data/saved_faces/
 backend/data/expanded_crops/
+# Derived AI visualisations of saved faces (app/face_enhance.py). Regenerable on
+# demand from the source footage, so they are artifacts rather than source.
+backend/data/enhanced_faces/
 backend/data/_diag_anpr/
 backend/data/*.db
+backend/data/*.bak_*
 backend/data/*.bak
 # Local safety copies taken before a destructive migration (scripts/*.py make
 # these). They contain a full cctv.db + FAISS indexes, so they must never be
