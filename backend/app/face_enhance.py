@@ -1,19 +1,48 @@
-"""Face Enhancement - derived visualisation from multiple verified views.
+"""Face Enhancement - find the clearest real view of a person, then only improve
+it if the improvement can be proved.
 
 WHAT THIS IS
 ------------
 Given a saved face, this does NOT sharpen the stored crop. It goes back to the
 ORIGINAL recording, collects every face belonging to that same tracked person,
-verifies each one against the saved identity, keeps only the best views, aligns
-them onto a common facial geometry and fuses them into one image.
+verifies each one against the saved identity, and scores them all. The primary
+output is the best NATURAL frame - a real photograph from somewhere else in the
+person's track, which is very often far clearer than the frame that happened to
+get saved. Restoration is secondary and optional.
 
-Multi-frame fusion is the point. A 12-pixel CCTV face contains almost no detail in
-any single frame, but the same face across 8 frames contains slightly different
-sub-pixel samples of the same subject. Combining them recovers real detail and
-suppresses sensor noise.
+    saved face -> analyse the whole track -> all verified appearances
+    -> rank by real image quality -> BEST NATURAL FRAME
+    -> optional light enhancement, accepted only if it measurably wins
 
-WHY NOT GFPGAN / CodeFormer
----------------------------
+WHY THAT ORDER (this was measured, and it reversed the original design)
+----------------------------------------------------------------------
+The first version fused the top 8 views onto a 224 px canvas and sharpened. On all
+seven faces checked it made things worse in the way that matters most: mean
+gradient magnitude, which collapses when an image is over-smoothed, fell by
+roughly half against the best natural crop - e.g. 48.8 -> 22.8 and 40.3 -> 18.7.
+
+Two causes, both fixed here:
+  1. Every face was warped to a 224 px canvas. On a 12-25 px face that is a 10-20x
+     upscale before any fusion, so the input to the median was already soft. The
+     canvas is now chosen from the actual face size (112 for small faces).
+  2. The 8 best-quality views were fused unconditionally, including distant small
+     ones. Averaging a 10 px view into a 40 px view destroys the detail the good
+     view had. Fusion now requires several views of comparable scale that register
+     tightly, and is skipped entirely otherwise.
+
+THE QUALITY GATE
+----------------
+Nothing is presented as enhanced on trust. Every candidate enhancement is compared
+against the best aligned source frame at identical size on edge energy, sharpness,
+clipped pixels, and - the important one - identity: the output is re-embedded with
+ArcFace and must not drift away from the saved reference. An enhancement that
+smooths detail away, clips, or moves the face towards someone else is REJECTED and
+the best natural frame is returned instead, labelled
+"Best Available Original Evidence". Saying the footage was already as good as it
+gets is a valid, honest answer.
+
+WHY NOT GFPGAN / CodeFormer AS THE DEFAULT
+------------------------------------------
 Two reasons, one practical and one forensic.
 
 Practical: GFPGAN and CodeFormer both depend on `basicsr`, which imports
@@ -28,16 +57,18 @@ prior of what faces look like. On the faces actually in this footage - measured 
 rather than derived from the evidence. Median fusion of aligned real frames cannot
 invent a feature that was not photographed; it can only average what was.
 
-So the default engine is multi-frame fusion. A GFPGAN backend is still wired in and
-is used automatically IF the package is ever installed (see _gfpgan_restore), and
-the model actually used is recorded on every result.
+A GFPGAN backend is still wired in and is used automatically IF the package is ever
+installed (see _gfpgan_restore), at a deliberately conservative restoration weight,
+and it has to pass the same gate as everything else. Whichever engine won is
+recorded on every result.
 
 HONESTY
 -------
-The output is labelled "AI-Enhanced - Derived Visualisation" everywhere it appears.
-The original saved face is never touched. Both images are hashed. When the evidence
-is too thin the pipeline refuses and says so instead of producing something
-confident-looking.
+An accepted enhancement is labelled "AI-Enhanced - Derived Visualisation"; a
+rejected one is labelled "Best Available Original Evidence" with the reason it was
+rejected. The original saved face is never touched. Both images are hashed. When
+the track holds no usable facial evidence at all the pipeline refuses outright
+instead of producing something confident-looking.
 """
 from __future__ import annotations
 
