@@ -95,6 +95,7 @@ export default function Workspace() {
 
   const fileRef = useRef(null)
   const playerRef = useRef(null)
+  const timelineRef = useRef(null)                   // horizontal result strip; followed instead of the page
   const pickScrollRef = useRef(false)                // true when a user View/open should scroll to the player (not the card)
   const [pickSeq, setPickSeq] = useState(0)          // bumped on user View / open, to scroll the player into view
   const currentRef = useRef(null); currentRef.current = current
@@ -237,9 +238,28 @@ export default function Workspace() {
         : (e?.response?.data?.detail || e.message || 'Could not save face.'))
     }
   }
-  // Keep the active card visible as playback moves through results - but NOT when
-  // the user explicitly clicked View/opened a clip (that scrolls to the player).
-  useEffect(() => { if (activeId == null || pickScrollRef.current) return; cardRefs.current.get(activeId)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }) }, [activeId])
+  // Follow playback in the TIMELINE STRIP only, never by scrolling the page.
+  //
+  // This used to call scrollIntoView() on the matching result CARD. .ws-cards is a
+  // plain page-flow grid with no overflow of its own, so that scrolled the whole
+  // window - and because result cards are ordered by relevance score rather than by
+  // time, the card for the next playback position is often near the end of the list.
+  // The result was the page yanking itself to the bottom on its own while the video
+  // played or seeked. The active card is still highlighted, which is what actually
+  // communicates the position.
+  //
+  // .ws-timeline is a horizontal scroller built for exactly this, so the active item
+  // is centred there instead by setting scrollLeft directly. Deliberately not
+  // scrollIntoView, which can still scroll ancestors vertically.
+  useEffect(() => {
+    if (activeId == null) return
+    const strip = timelineRef.current
+    const el = strip?.querySelector('.ws-tl.active')
+    if (!strip || !el) return
+    const target = el.offsetLeft - (strip.clientWidth - el.offsetWidth) / 2
+    const max = strip.scrollWidth - strip.clientWidth
+    if (max > 0) strip.scrollTo({ left: Math.max(0, Math.min(target, max)), behavior: 'smooth' })
+  }, [activeId])
   // Bring the player into view when the user clicks View / opens a clip, so the
   // selected result is visible instead of updating off-screen at the top.
   useEffect(() => { if (pickSeq === 0) return; playerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); pickScrollRef.current = false }, [pickSeq])
@@ -457,7 +477,7 @@ export default function Workspace() {
           {timeline.length > 0 && !loading && (
             <section className="fp-panel">
               <div className="fp-panel-title"><span><IcClock size={16} /> Result timeline</span><span className="muted">{timeline.length} in time order</span></div>
-              <div className="ws-timeline">
+              <div className="ws-timeline" ref={timelineRef}>
                 {timeline.map((r) => (
                   <div key={r.detection_id} className={'ws-tl ' + (activeId === r.detection_id ? 'active' : '')} onClick={() => pickResult(r)} title={fmtTs(r.timestamp)}>
                     {r.crop_url ? <img className="ws-tl-thumb" src={r.crop_url} alt="" loading="lazy" /> : <div className="ws-tl-thumb empty">{r.class_label}</div>}
