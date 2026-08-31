@@ -513,6 +513,37 @@ def _fuse(aligned: list, min_ecc: float | None = None) -> tuple:
     return np.clip(med, 0, 255).astype("uint8"), "median", used, ccs, arr
 
 
+def pick_best(ranked: list) -> dict:
+    """The clearest view to actually show an investigator.
+
+    Two-stage on purpose. Pixel count is what decides whether a face is legible, so
+    only the largest verified views are eligible; the existing 9-factor composite
+    then chooses among them on sharpness, pose, exposure and so on. Ranking on the
+    composite alone picked a 13 px face over a 25 px one on a real saved face,
+    because size carries just 0.18 of that score."""
+    if not ranked:
+        return {}
+    max_px = max((c["face_size"] or 0) for c in ranked)
+    floor = max_px * config.FACE_ENH_BEST_SIZE_FRAC
+    pool = [c for c in ranked if (c["face_size"] or 0) >= floor] or ranked
+    return max(pool, key=lambda c: (c["quality"], c["identity"] or 0))
+
+
+def fusion_views(keep: list) -> list:
+    """Which views may be fused with the best one.
+
+    Only views of COMPARABLE SCALE. The original pipeline fused the top 8 by
+    quality regardless of size, so a distant 10 px face got averaged into a close
+    40 px face and took its detail with it - a real cause of the over-smoothing.
+    A view must sit inside a band around the best view's face size to qualify."""
+    if not keep:
+        return []
+    best_px = max(1, keep[0]["face_size"])
+    lo = best_px * config.FACE_ENH_FUSE_SIZE_LO
+    hi = best_px * config.FACE_ENH_FUSE_SIZE_HI
+    return [keep[0]] + [c for c in keep[1:] if lo <= c["face_size"] <= hi]
+
+
 def _noise_stats(arr) -> dict:
     """Measure what the multi-frame step actually did to the noise.
 
