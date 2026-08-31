@@ -280,7 +280,18 @@ CREATE TABLE IF NOT EXISTS enhanced_faces (
     source_frames          TEXT,   -- JSON: per-frame evidence behind the result
     metrics                TEXT,   -- JSON: before/after measurements
     label                  TEXT,
-    created_at             TEXT
+    created_at             TEXT,
+    -- The clearest REAL frame found anywhere in the person's track. This is the
+    -- primary result: restoration is only accepted when it measurably beats it.
+    best_source_path       TEXT,
+    best_source_frame      INTEGER,
+    best_source_quality    REAL,
+    best_source_hash       TEXT,
+    -- Outcome of the quality gate. 0 means the enhancement was REJECTED and
+    -- file_path holds the best natural frame instead.
+    enhancement_applied    INTEGER,
+    gate_status            TEXT,
+    gate_reason            TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_enh_saved ON enhanced_faces(saved_face_id);
