@@ -465,6 +465,7 @@ def _register(ref_gray, img, min_ecc: float | None = None):
     registration (ECC, euclidean: rotation + translation). It also doubles as a
     third verification stage: a view that cannot be registered to the reference is
     not describing the same thing and is dropped."""
+    floor = config.FACE_ENH_MIN_ECC if min_ecc is None else min_ecc
     warp = np.eye(2, 3, dtype="float32")
     try:
         g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype("float32")
@@ -473,7 +474,7 @@ def _register(ref_gray, img, min_ecc: float | None = None):
             (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 80, 1e-6), None, 5)
     except cv2.error:
         return None, 0.0
-    if not np.isfinite(cc) or cc < config.FACE_ENH_MIN_ECC:
+    if not np.isfinite(cc) or cc < floor:
         return None, float(cc if np.isfinite(cc) else 0.0)
     h, w = img.shape[:2]
     out = cv2.warpAffine(img, warp, (w, h),
@@ -482,12 +483,14 @@ def _register(ref_gray, img, min_ecc: float | None = None):
     return out, float(cc)
 
 
-def _fuse(aligned: list) -> tuple:
+def _fuse(aligned: list, min_ecc: float | None = None) -> tuple:
     """Combine the verified views into one image.
 
     Per-pixel MEDIAN, not mean: a median ignores a frame where a limb, another
     head or a compression artefact crossed the face, where an average would smear
-    it in. Returns (image, mode, indices actually used, ECC correlations)."""
+    it in. `aligned[0]` is the reference and is always kept.
+
+    Returns (image, mode, indices used, ECC correlations, registered stack)."""
     ref = aligned[0]
     if len(aligned) == 1:
         return ref.copy(), "single-frame", [0], [], None
@@ -496,7 +499,7 @@ def _fuse(aligned: list) -> tuple:
         cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY).astype("float32"), (0, 0), 1.0)
     stack, used, ccs = [ref.astype("float32")], [0], []
     for i, img in enumerate(aligned[1:], start=1):
-        reg, cc = _register(ref_gray, img)
+        reg, cc = _register(ref_gray, img, min_ecc)
         ccs.append(round(cc, 4))
         if reg is None:
             continue
