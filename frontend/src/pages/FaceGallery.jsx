@@ -248,6 +248,8 @@ function EnhancePanel({ face }) {
   }
 
   const m = enh?.metrics || {}
+  const t = m.track_gain || {}
+  const chosen = (m.gate_report || []).find((r) => r.passed && r.name === enh?.model_name)
 
   return (
     <div className="fe-wrap">
@@ -267,9 +269,10 @@ function EnhancePanel({ face }) {
 
       {busy && (
         <div className="fe-busy">
-          Re-opening the original recording, collecting every face on this person's
-          track, verifying each against the saved identity and fusing the best views.
-          This takes a few seconds and is not run during ingestion.
+          Re-reading the original recording, collecting every face on this person's track,
+          re-sampling between the indexed frames at native rate, verifying each appearance
+          against the saved identity and testing whether any enhancement actually helps.
+          This takes a few seconds and is never run during ingestion.
         </div>
       )}
 
@@ -292,36 +295,55 @@ function EnhancePanel({ face }) {
 
       {!enh && !busy && !refusal && (
         <div className="fe-intro">
-          {loaded ? <>This does not sharpen the stored crop. It goes back to the original
-            recording, gathers every face belonging to this tracked person, rejects blurred,
-            tiny, occluded and identity-mismatched views, then fuses the survivors.</>
-            : 'Checking for an existing enhancement…'}
+          {loaded ? <>This does not sharpen the stored crop. It re-reads the original
+            recording, finds every appearance of this tracked person — including the frames
+            between the indexed samples, which nothing has examined before — verifies each
+            against the saved identity and picks the <b>clearest real frame</b>. Restoration
+            is only applied if it measurably beats that frame.</>
+            : 'Checking for an existing result…'}
         </div>
       )}
 
       {enh && (
         <>
           {mode === 'side' ? (
-            <div className="fe-pair">
+            <div className="fe-three">
               <figure>
-                <figcaption>ORIGINAL</figcaption>
+                <figcaption>1 · ORIGINAL SAVED FACE</figcaption>
                 <img src={original} alt="original saved face" />
                 <span className="fe-tag orig">Unmodified evidence</span>
               </figure>
               <figure>
-                <figcaption>AI-ENHANCED</figcaption>
-                <img src={enh.enhanced_url} alt="enhanced derived visualisation" />
-                <span className="fe-tag derived">{enh.label}</span>
+                <figcaption>2 · BEST SOURCE FRAME FOUND</figcaption>
+                <img src={enh.best_source_url || original} alt="clearest frame found in the track" />
+                <span className="fe-tag natural">
+                  Real frame {enh.best_source_frame}{m.best_from_refined ? ' · unindexed' : ''}
+                </span>
+              </figure>
+              <figure>
+                <figcaption>3 · AI-ENHANCED</figcaption>
+                {enh.enhancement_applied ? (
+                  <>
+                    <img src={enh.enhanced_url} alt="enhanced derived visualisation" />
+                    <span className="fe-tag derived">{enh.label}</span>
+                  </>
+                ) : (
+                  <div className="fe-declined">
+                    <b>Not applied</b>
+                    <span>AI enhancement did not improve the verified source image,
+                      so the real frame is shown instead.</span>
+                  </div>
+                )}
               </figure>
             </div>
           ) : (
             <div className="fe-slider-wrap">
               <div className="fe-slider" style={{ '--split': split + '%' }}>
                 <img className="a" src={original} alt="original saved face" />
-                <img className="b" src={enh.enhanced_url} alt="enhanced derived visualisation" />
+                <img className="b" src={enh.enhanced_url} alt="result of the analysis" />
                 <span className="fe-handle" />
-                <span className="fe-lab l">ORIGINAL</span>
-                <span className="fe-lab r">AI-ENHANCED</span>
+                <span className="fe-lab l">SAVED</span>
+                <span className="fe-lab r">{enh.enhancement_applied ? 'AI-ENHANCED' : 'BEST SOURCE'}</span>
               </div>
               <input type="range" min="0" max="100" value={split} aria-label="Compare original and enhanced"
                      onChange={(e) => setSplit(Number(e.target.value))} />
