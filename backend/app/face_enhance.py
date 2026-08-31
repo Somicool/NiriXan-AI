@@ -801,6 +801,9 @@ def _row_out(r: dict) -> dict:
             except (TypeError, ValueError):
                 r[key] = None
     r["enhanced_url"] = media_url(r.get("file_path"))
+    # stage 2 of the UI: the clearest REAL frame found in the person's track
+    r["best_source_url"] = media_url(r.get("best_source_path"))
+    r["enhancement_applied"] = bool(r.get("enhancement_applied"))
     r["available"] = bool(r.get("file_path") and Path(r["file_path"]).exists())
     for fr in (r.get("source_frames") or []):
         if fr.get("path"):
