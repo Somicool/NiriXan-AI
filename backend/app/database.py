@@ -350,6 +350,17 @@ def _migrate(conn) -> None:
         for col, decl in (("export_id", "TEXT"), ("detection_ids", "TEXT")):
             if col not in rcols:
                 conn.execute(f"ALTER TABLE case_reports ADD COLUMN {col} {decl}")
+    # Face Enhancement: the pipeline now prefers the clearest REAL frame from the
+    # person's track and only accepts restoration that passes a quality gate, so
+    # the chosen natural frame and the gate's verdict are recorded alongside.
+    ecols = {r["name"] for r in conn.execute("PRAGMA table_info(enhanced_faces)").fetchall()}
+    if ecols:
+        for col, decl in (("best_source_path", "TEXT"), ("best_source_frame", "INTEGER"),
+                          ("best_source_quality", "REAL"), ("best_source_hash", "TEXT"),
+                          ("enhancement_applied", "INTEGER"), ("gate_status", "TEXT"),
+                          ("gate_reason", "TEXT")):
+            if col not in ecols:
+                conn.execute(f"ALTER TABLE enhanced_faces ADD COLUMN {col} {decl}")
     # Camera Registry: siting details needed for real journey reconstruction.
     ccols = {r["name"] for r in conn.execute("PRAGMA table_info(cameras)").fetchall()}
     for col, decl in (("address", "TEXT"), ("road_name", "TEXT"),
