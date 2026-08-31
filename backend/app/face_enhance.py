@@ -134,7 +134,68 @@ def _sharpness(img) -> float:
         return 0.0
 
 
+def _edge_energy(img) -> float:
+    """Mean Sobel gradient magnitude.
+
+    This is the over-smoothing detector. Variance of Laplacian can be pushed up by
+    an unsharp mask even while real structure is being lost, but mean gradient
+    magnitude falls when edges are washed out. It is what caught the original
+    pipeline degrading every one of the faces it was tested on."""
+    try:
+        g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+        gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
+        return float(np.mean(cv2.magnitude(gx, gy)))
+    except Exception:
+        return 0.0
+
+
+def _saturated_frac(img) -> float:
+    """Fraction of pixels crushed to pure black or blown to pure white.
+
+    Sharpening overshoots into clipping, which reads as 'crisp' on a sharpness
+    metric while actually destroying information."""
+    try:
+        g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+        return float(np.mean((g <= 2) | (g >= 253)))
+    except Exception:
+        return 0.0
+
+
+def _embed_aligned(img):
+    """ArcFace embedding of an ALREADY-ALIGNED face crop.
+
+    Uses the recognition model directly rather than running the detector first.
+    Detection fails on these images for a reason that has nothing to do with
+    quality - the face fills the entire frame with no surrounding context, and
+    SCRFD needs some margin (verified: 0 faces found on a 448 px aligned crop, 1
+    face at det=0.82 on the same image with 50% padding added). Since the crop is
+    already in canonical ArcFace geometry, get_feat is the correct entry point and
+    gives a comparable embedding for any candidate image."""
+    try:
+        from .ingestion import face_recognizer
+        rec = getattr(face_recognizer.get_face_app(), "models", {}).get("recognition")
+        if rec is None or img is None or not img.size:
+            return None
+        a = cv2.resize(img, (112, 112), interpolation=cv2.INTER_AREA)
+        v = np.asarray(rec.get_feat(a), dtype="float32").ravel()
+        n = float(np.linalg.norm(v))
+        return (v / n) if n > 0 else None
+    except Exception:
+        return None
+
+
 # --------------------------------------------------------- candidate gathering
+def align_size_for(face_px: int) -> int:
+    """Alignment canvas chosen from the ACTUAL face size.
+
+    A fixed 224 canvas was the single biggest cause of soft output: it upscales a
+    12 px face by 18x before anything else runs. Small faces stay on the 112 px
+    canonical canvas, which is still an upscale but a far smaller one."""
+    return (config.FACE_ENH_ALIGN_LARGE if (face_px or 0) >= config.FACE_ENH_ALIGN_SWITCH
+            else config.FACE_ENH_ALIGN_SMALL)
+
+
 def _align(crop, kps, size: int):
     """Warp a face onto the canonical ArcFace geometry.
 
