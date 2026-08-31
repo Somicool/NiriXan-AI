@@ -613,13 +613,173 @@ def _gfpgan_restore(img):
             return None, None
         restorer = GFPGANer(model_path=str(weights), upscale=config.FACE_ENH_SCALE,
                             arch="clean", channel_multiplier=2, bg_upsampler=None)
-        _c, _r, out = restorer.enhance(img, has_aligned=True, only_center_face=True,
-                                       paste_back=False)
+        kw = {"has_aligned": True, "only_center_face": True, "paste_back": False}
+        try:                                   # newer builds accept a blend weight
+            _c, _r, out = restorer.enhance(img, weight=config.FACE_ENH_RESTORE_WEIGHT, **kw)
+        except TypeError:                       # older signature: blend it ourselves
+            _c, _r, out = restorer.enhance(img, **kw)
+            if out is not None:
+                base = cv2.resize(img, (out.shape[1], out.shape[0]),
+                                  interpolation=cv2.INTER_LANCZOS4)
+                w = config.FACE_ENH_RESTORE_WEIGHT
+                out = cv2.addWeighted(out, w, base, 1.0 - w, 0)
         if out is None:
             return None, None
-        return out, f"GFPGAN v1.4 (upscale x{config.FACE_ENH_SCALE})"
+        return out, (f"GFPGAN v1.4 at conservative weight "
+                     f"{config.FACE_ENH_RESTORE_WEIGHT} (upscale x{config.FACE_ENH_SCALE})")
     except Exception:
         return None, None
+
+
+# ------------------------------------------------------- CodeFormer (ONNX/GPU)
+_CF_SESSION = None
+_CF_TRIED = False
+
+
+def _codeformer_session():
+    """Lazily open the CodeFormer ONNX session, once per process.
+
+    Loading a 377 MB model takes a few seconds, so it is cached and never opened
+    during ingestion - only when an officer asks for an enhancement. Prefers the
+    CUDA provider and falls back to CPU."""
+    global _CF_SESSION, _CF_TRIED
+    if _CF_SESSION is not None or _CF_TRIED:
+        return _CF_SESSION
+    _CF_TRIED = True
+    try:
+        path = Path(config.FACE_ENH_CODEFORMER)
+        if not path.exists():
+            return None
+        import onnxruntime as ort
+        so = ort.SessionOptions()
+        so.log_severity_level = 3
+        avail = ort.get_available_providers()
+        providers = (["CUDAExecutionProvider", "CPUExecutionProvider"]
+                     if "CUDAExecutionProvider" in avail else ["CPUExecutionProvider"])
+        _CF_SESSION = ort.InferenceSession(str(path), so, providers=providers)
+        print(f"[face_enhance] CodeFormer ready on {_CF_SESSION.get_providers()[0]}")
+    except Exception as e:
+        print(f"[face_enhance] CodeFormer unavailable: {type(e).__name__}: {e}")
+        _CF_SESSION = None
+    return _CF_SESSION
+
+
+def codeformer_available() -> bool:
+    return _codeformer_session() is not None
+
+
+def _codeformer_restore(aligned512, w: float):
+    """Restore one aligned face with CodeFormer.
+
+    `w` is the fidelity weight: 1.0 keeps the result as close to the real input as
+    the model allows, 0.0 lets it generate freely. Higher is used first because
+    this is evidence, not portrait retouching.
+
+    The input must be an ArcFace-aligned 512 px crop - 512 is a multiple of 128, so
+    insightface's estimate_norm accepts it directly."""
+    sess = _codeformer_session()
+    if sess is None or aligned512 is None or not aligned512.size:
+        return None
+    try:
+        rgb = cv2.cvtColor(aligned512, cv2.COLOR_BGR2RGB).astype("float32") / 255.0
+        x = ((rgb - 0.5) / 0.5).transpose(2, 0, 1)[None].astype("float32")
+        y = sess.run(["y"], {"x": x, "w": np.array(float(w), dtype="float64")})[0]
+        out = y[0].transpose(1, 2, 0)
+        out = np.clip((out * 0.5 + 0.5) * 255.0, 0, 255).astype("uint8")
+        return cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
+    except Exception as e:
+        print(f"[face_enhance] CodeFormer inference failed: {type(e).__name__}: {e}")
+        return None
+
+
+# --------------------------------------------------------------- quality gate
+def _measure(img, ref_emb) -> dict:
+    """The numbers the gate decides on."""
+    emb = _embed_aligned(img)
+    return {"edge": round(_edge_energy(img), 3),
+            "sharpness": round(_sharpness(img), 3),
+            "saturated": round(_saturated_frac(img), 5),
+            "identity": (round(_cosine(ref_emb, emb), 4)
+                         if (ref_emb is not None and emb is not None) else None)}
+
+
+def _gate(base, candidates: list, ref_emb) -> dict:
+    """Decide whether ANY enhancement is good enough to show instead of the source.
+
+    `base` is the best verified source frame, aligned. Every candidate is compared
+    against it at identical size on four axes, and must win or tie on all of them:
+
+      edge energy  - the over-smoothing test. Must be >= 98% of the source.
+      sharpness    - must not be lower than the source.
+      clipping     - must not blow out noticeably more pixels.
+      identity     - re-embedded with ArcFace, must not drift from the saved face.
+
+    Identity is the anti-hallucination check. If restoration invents facial
+    structure, the embedding moves away from the saved reference, and that is
+    detectable even when the picture looks convincing.
+
+    Returns the verdict plus the full comparison table, so a rejection can be
+    explained rather than just asserted."""
+    b = _measure(base, ref_emb)
+    report, passing = [], []
+    for name, img, kind in candidates:
+        if img is None or not getattr(img, "size", 0):
+            continue
+        # measured at the SOURCE's resolution so a model that outputs 512 px gets no
+        # free credit for resolution it invented; the full-size image is what gets
+        # stored if this candidate wins.
+        probe = img
+        if probe.shape[:2] != base.shape[:2]:
+            probe = cv2.resize(img, (base.shape[1], base.shape[0]),
+                               interpolation=cv2.INTER_AREA)
+        m = _measure(probe, ref_emb)
+        edge_r = (m["edge"] / b["edge"]) if b["edge"] > 0 else 0.0
+        sharp_r = (m["sharpness"] / b["sharpness"]) if b["sharpness"] > 0 else 0.0
+        id_drop = ((b["identity"] - m["identity"])
+                   if (b["identity"] is not None and m["identity"] is not None) else None)
+
+        fails = []
+        if edge_r < config.FACE_ENH_GATE_EDGE:
+            fails.append(f"edge detail fell to {edge_r * 100:.0f}% of the source "
+                         f"(over-smoothed)")
+        if sharp_r < config.FACE_ENH_GATE_SHARP:
+            fails.append(f"sharpness fell to {sharp_r * 100:.0f}% of the source")
+        if m["saturated"] - b["saturated"] > config.FACE_ENH_GATE_SAT_RISE:
+            fails.append("clipped highlights or shadows")
+        if kind == "generative":
+            # cannot be judged on drift - it rebuilds every pixel. The test is
+            # whether the reconstruction is still recognisably this person.
+            if m["identity"] is None:
+                fails.append("no face could be read back out of the output")
+            elif m["identity"] < config.FACE_ENH_GATE_ID_FLOOR:
+                fails.append(f"reconstruction no longer matches the saved person "
+                             f"({m['identity']:.2f} < {config.FACE_ENH_GATE_ID_FLOOR})")
+        else:
+            if id_drop is not None and id_drop > config.FACE_ENH_GATE_ID_DROP:
+                fails.append(f"identity drifted {id_drop:.3f} from the saved face "
+                             f"(ghosting or another person blended in)")
+            if m["identity"] is not None and m["identity"] < config.FACE_ENH_MIN_IDENTITY:
+                fails.append("output no longer matches the saved identity")
+
+        row = {"name": name, "kind": kind, **m, "edge_ratio": round(edge_r, 3),
+               "sharpness_ratio": round(sharp_r, 3),
+               "identity_drop": round(id_drop, 4) if id_drop is not None else None,
+               "passed": not fails, "failed_because": fails}
+        report.append(row)
+        if not fails:
+            passing.append((name, img, row, kind))
+
+    # Preference order among survivors: a non-generative result is always preferred
+    # over a generated one because it is made of real pixels. Within a kind, the one
+    # that stays closest to the saved person wins - not the one that looks sharpest.
+    passing.sort(key=lambda p: (0 if p[3] != "generative" else 1,
+                                -(p[2]["identity"] or 0)))
+    best = passing[0] if passing else None
+    return {"base": b, "report": report,
+            "chosen": None if best is None else best[0],
+            "image": None if best is None else best[1],
+            "chosen_row": None if best is None else best[2],
+            "chosen_kind": None if best is None else best[3]}
 
 
 # ------------------------------------------------------------------ public API
