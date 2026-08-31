@@ -313,18 +313,144 @@ def collect_candidates(video_id, track_id, ref_emb, max_frames=None) -> dict:
                     "brightness": m["brightness"], "occlusion": m["occlusion"],
                     "det_score": m["det_score"], "resolution": m["resolution"],
                     "identity": round(sim, 4) if sim is not None else None,
-                    "_aligned": aligned,
+                    "frame_bbox": [fx1 + ox, fy1 + oy, fx2 + ox, fy2 + oy],
+                    "_crop": crop, "_kps": np.asarray(f.kps, dtype="float32"),
                 })
     finally:
         reader.close()
 
     # best first: quality, then how much it looks like the saved identity
     out["candidates"].sort(key=lambda c: (c["quality"], c["identity"] or 0), reverse=True)
+    out["detections"] = dets
     return out
 
 
+def _interp_box(dets_by_frame: list, frame: int):
+    """Person box at an UNINDEXED native frame, interpolated between the stored
+    detections either side. A person's bounding box moves smoothly between two
+    samples a fraction of a second apart, so linear interpolation is sound."""
+    prev = nxt = None
+    for d in dets_by_frame:
+        fn = d.get("frame_number")
+        if fn is None:
+            continue
+        if fn <= frame:
+            prev = d
+        if fn >= frame:
+            nxt = d
+            break
+    if prev is None and nxt is None:
+        return None, None
+    if prev is None or nxt is None:
+        d = prev or nxt
+        return {**d, "frame_number": frame}, d
+    f0, f1 = prev["frame_number"], nxt["frame_number"]
+    if f1 == f0:
+        return {**prev, "frame_number": frame}, prev
+    t = (frame - f0) / float(f1 - f0)
+    box = {}
+    for k in ("bbox_x", "bbox_y", "bbox_w", "bbox_h"):
+        a, b = prev.get(k), nxt.get(k)
+        if a is None or b is None:
+            return None, None
+        box[k] = a + (b - a) * t
+    near = prev if t < 0.5 else nxt
+    return {**near, **box, "frame_number": frame}, near
+
+
+def refine_around_best(video_id, got: dict, ref_emb) -> dict:
+    """Second pass: look at the native frames NOBODY has ever examined.
+
+    The sparse pass can only see frames that ingestion happened to sample, and
+    Save Face already chose the best of those with the same scorer - so the sparse
+    pass alone almost never beats the saved face. This re-reads the source video at
+    native frame rate around the best few views, interpolating the person box, and
+    is where a genuinely clearer natural appearance actually turns up.
+
+    Adds any better views to got["candidates"] and returns the pass statistics."""
+    stats = {"frames": 0, "faces": 0, "added": 0, "seeds": []}
+    if not config.FACE_ENH_REFINE or not got.get("candidates"):
+        return stats
+    dets = sorted([d for d in (got.get("detections") or [])
+                   if d.get("frame_number") is not None],
+                  key=lambda d: d["frame_number"])
+    if not dets:
+        return stats
+    lo, hi = dets[0]["frame_number"], dets[-1]["frame_number"]
+    vpath = faces_gallery.source_video_path(video_id)
+    if vpath is None:
+        return stats
+
+    seen = {c["frame_number"] for c in got["candidates"]}
+    targets: list[int] = []
+    for seed in got["candidates"][:config.FACE_ENH_REFINE_SEEDS]:
+        sf = seed["frame_number"]
+        stats["seeds"].append(sf)
+        for off in range(-config.FACE_ENH_REFINE_RADIUS,
+                         config.FACE_ENH_REFINE_RADIUS + 1,
+                         config.FACE_ENH_REFINE_STRIDE):
+            f = int(sf) + off
+            if lo <= f <= hi and f not in seen:
+                seen.add(f)
+                targets.append(f)
+    targets = sorted(targets)[:config.FACE_ENH_REFINE_MAX]
+    if not targets:
+        return stats
+
+    reader = faces_gallery._FrameReader(vpath)
+    if not reader.ok:
+        reader.close()
+        return stats
+    try:
+        for f in targets:
+            synth, near = _interp_box(dets, f)
+            if synth is None:
+                continue
+            frame = reader.read(f)
+            if frame is None:
+                continue
+            crop, (ox, oy) = faces_gallery._expanded_from_full_frame(frame, synth)
+            if crop is None or not crop.size:
+                continue
+            stats["frames"] += 1
+            for face in faces_gallery._detect_faces_kps(crop):
+                if float(face.det_score) < config.FACE_MIN_DET_SCORE:
+                    continue
+                stats["faces"] += 1
+                m = faces_gallery._face_quality(face, crop)
+                if (m["face_size"] < config.FACE_ENH_MIN_PX
+                        or m["occlusion"] < config.FACE_ENH_MIN_VISIBLE
+                        or m["quality"] < config.FACE_ENH_MIN_QUALITY):
+                    continue
+                emb = getattr(face, "normed_embedding", None)
+                sim = _cosine(ref_emb, emb) if (ref_emb is not None and emb is not None) else None
+                if ref_emb is not None and (sim is None or sim < config.FACE_ENH_MIN_IDENTITY):
+                    continue
+                if getattr(face, "kps", None) is None:
+                    continue
+                fx1, fy1, fx2, fy2 = m["bbox"]
+                got["candidates"].append({
+                    "detection_id": near["detection_id"],
+                    "frame_number": f, "timestamp": near.get("timestamp"),
+                    "quality": m["quality"], "face_size": m["face_size"],
+                    "sharpness": m["sharpness"], "frontal": m["frontal"],
+                    "brightness": m["brightness"], "occlusion": m["occlusion"],
+                    "det_score": m["det_score"], "resolution": m["resolution"],
+                    "identity": round(sim, 4) if sim is not None else None,
+                    "frame_bbox": [fx1 + ox, fy1 + oy, fx2 + ox, fy2 + oy],
+                    "refined": True,
+                    "_crop": crop, "_kps": np.asarray(face.kps, dtype="float32"),
+                })
+                stats["added"] += 1
+    finally:
+        reader.close()
+
+    got["candidates"].sort(key=lambda c: (c["quality"], c["identity"] or 0), reverse=True)
+    return stats
+
+
 # ------------------------------------------------------------------- fusion
-def _register(ref_gray, img):
+def _register(ref_gray, img, min_ecc: float | None = None):
     """Sub-pixel align one candidate onto the reference view.
 
     The landmark warp in _align is NOT accurate enough on its own here, and that
