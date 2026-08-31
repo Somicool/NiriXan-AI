@@ -225,8 +225,13 @@ def collect_candidates(video_id, track_id, ref_emb, max_frames=None) -> dict:
     """Every usable face of this tracked person, scored and identity-checked.
 
     Reuses the EXISTING scan order, frame reader, face detector and 9-factor
-    quality scorer from faces_gallery - this adds only the identity check and the
-    canonical alignment. Nothing about best-face selection or saving is changed."""
+    quality scorer from faces_gallery - this adds only the identity check.
+    Nothing about best-face selection or saving is changed.
+
+    Alignment deliberately does NOT happen here. The canvas size depends on the
+    winning face's size, which is not known until every candidate has been scored,
+    so each candidate keeps its source crop and landmarks and is warped later. That
+    also means only the handful of views actually used get warped."""
     out = {"candidates": [], "frames_seen": 0, "faces_seen": 0,
            "rejected": {"quality": 0, "size": 0, "occluded": 0, "identity": 0, "align": 0},
            "reason": None, "video_path": None}
@@ -263,7 +268,7 @@ def collect_candidates(video_id, track_id, ref_emb, max_frames=None) -> dict:
             frame = reader.read(d.get("frame_number"))
             if frame is None:
                 continue
-            crop, _off = faces_gallery._expanded_from_full_frame(frame, d)
+            crop, (ox, oy) = faces_gallery._expanded_from_full_frame(frame, d)
             if crop is None or not crop.size:
                 continue
             out["frames_seen"] += 1
@@ -292,11 +297,13 @@ def collect_candidates(video_id, track_id, ref_emb, max_frames=None) -> dict:
                         out["rejected"]["identity"] += 1
                         continue
 
-                aligned = _align(crop, f.kps, config.FACE_ENH_ALIGN_SIZE)
-                if aligned is None or not aligned.size:
+                if getattr(f, "kps", None) is None:
                     out["rejected"]["align"] += 1
                     continue
 
+                # face box in ORIGINAL-FRAME coordinates, so the winning view can be
+                # re-cropped from the source video at its true native resolution
+                fx1, fy1, fx2, fy2 = m["bbox"]
                 out["candidates"].append({
                     "detection_id": d["detection_id"],
                     "frame_number": d.get("frame_number"),
