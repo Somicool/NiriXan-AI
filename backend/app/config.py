@@ -457,13 +457,88 @@ FACE_ENH_MIN_VISIBLE = 0.60                  # reject heavily occluded / truncat
 # because at 10-25 px BOTH embeddings are noisy, so even a true match scores low.
 FACE_ENH_MIN_IDENTITY = 0.38
 
-FACE_ENH_ALIGN_SIZE = 224                    # canonical ArcFace alignment canvas
+# --- alignment canvas ---
+# estimate_norm only accepts multiples of 112 (or 128), so these are the choices.
+# Picking 224 for EVERY face was the main cause of soft, artificial output: warping
+# a 12 px face onto a 224 px canvas is an 18x upscale before anything else happens,
+# and fusing several of those blurred the result further. Small faces now stay on
+# the 112 canonical canvas.
+FACE_ENH_ALIGN_SMALL = 112
+FACE_ENH_ALIGN_LARGE = 224
+FACE_ENH_ALIGN_SWITCH = 40                   # face px at which the larger canvas is used
+FACE_ENH_ALIGN_SIZE = FACE_ENH_ALIGN_LARGE   # legacy default / upper bound
+
+# --- dense refinement pass (where the real improvement comes from) ---
+# Detections are only stored at the SAMPLED rate (1-2 FPS), so 15-30 native frames
+# between each stored detection have never been looked at by anything. Measured on
+# the 13 saved faces, scanning only the stored detections finds a better frame than
+# the saved one in just 1 of 13 cases - unsurprising, since Save Face already picked
+# the best STORED frame with the same scorer. The gain has to come from the frames
+# that were never indexed.
+#
+# So after the sparse pass, the neighbourhood of the best few views is re-sampled at
+# native frame rate, interpolating the person box between the two stored detections
+# either side. Same approach the ANPR pipeline already uses for unreadable plates.
+FACE_ENH_REFINE = True
+FACE_ENH_REFINE_SEEDS = 3                    # best views to search around
+FACE_ENH_REFINE_RADIUS = 12                  # native frames either side of a seed
+FACE_ENH_REFINE_STRIDE = 2                   # examine every Nth native frame
+FACE_ENH_REFINE_MAX = 48                     # hard cap on extra decodes (cost guard)
+
+# When choosing the frame a human will LOOK at, pixel count matters more than the
+# generic composite quality score implies - that score weights size at only 0.18
+# because it was tuned to answer "is this a usable face at all". Left alone, it
+# picked a 13 px face over a 25 px one on saved face 12 purely on sharpness/pose.
+# So selection is restricted to the largest views available (this fraction of the
+# biggest verified face) and the composite score then picks among those.
+# faces_gallery._face_quality itself is NOT modified - Save Face and search still
+# use it exactly as before.
+FACE_ENH_BEST_SIZE_FRAC = 0.80
+
 # ECC correlation floor for the sub-pixel registration pass. A view that cannot be
 # registered to the reference this well is dropped rather than fused in - see the
 # measurement written up in face_enhance._register.
 FACE_ENH_MIN_ECC = 0.55
-FACE_ENH_SCALE = 2                           # output upscale factor
-FACE_ENH_UNSHARP = 0.5                       # unsharp strength (gentle on purpose)
+
+# --- multi-frame fusion is now OPTIONAL and must earn its place ---
+# Fusion is only attempted when there are genuinely comparable views to fuse.
+# Blending a distant 10 px view into a close 40 px one is what produced the
+# over-smoothed results, so views far from the best one's scale are excluded.
+FACE_ENH_FUSE_MIN_VIEWS = 3
+FACE_ENH_FUSE_MIN_ECC = 0.80                 # stricter than the verification floor
+FACE_ENH_FUSE_SIZE_LO = 0.70                 # view must be >= 70% of the best face size
+FACE_ENH_FUSE_SIZE_HI = 1.60                 # ... and <= 160%
+
+# --- quality gate ---
+# No enhancement is accepted unless it measurably beats the best ALIGNED source
+# frame on all of these. Ratios are against that frame, measured at identical size.
+FACE_ENH_GATE_EDGE = 0.98                    # mean gradient magnitude (over-smoothing test)
+FACE_ENH_GATE_SHARP = 1.00                   # variance of Laplacian
+FACE_ENH_GATE_SAT_RISE = 0.02                # max extra clipped-pixel fraction
+
+# Identity is tested two different ways, because the two kinds of enhancement fail
+# in completely different ways.
+#
+# NON-GENERATIVE (multi-frame fusion) combines real pixels, so the face should
+# barely move at all. Any real drift means ghosting or a bystander blended in, and
+# 0.03 is the tolerance.
+FACE_ENH_GATE_ID_DROP = 0.03
+# GENERATIVE (CodeFormer) resynthesises every pixel by design, so it ALWAYS moves
+# the embedding - measured at 0.17-0.51 on this footage at every fidelity setting.
+# Holding it to 0.03 is a category error; it would reject the model unconditionally.
+# The meaningful question is whether the output is still recognisably the same
+# person, so it is held to an absolute floor instead - the project's own existing
+# same-person threshold (FACE_SIM_THRESHOLD). The measured drift is always shown in
+# the UI next to the image so the divergence is never hidden.
+FACE_ENH_GATE_ID_FLOOR = 0.50
+
+FACE_ENH_SCALE = 2                           # GFPGAN upscale factor (not a blind resize)
+FACE_ENH_UNSHARP = 0.35                      # unsharp strength (reduced from 0.5)
+# Conservative restoration strength for the generative backends. GFPGAN blends the
+# restored face back at this weight; CodeFormer's fidelity term works the same way.
+# Kept low deliberately: high strength rewrites skin and facial structure, which
+# changes identity and is exactly what must not happen to evidence.
+FACE_ENH_RESTORE_WEIGHT = 0.5
 
 # "auto" uses GFPGAN when the package + weights are present, otherwise falls back
 # to multi-frame fusion. "fusion" forces fusion. See the module docstring for why
