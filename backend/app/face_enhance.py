@@ -835,149 +835,238 @@ def enhance(saved_id: int, force: bool = False) -> dict:
     ref_emb = _decode_emb(saved.get("embedding"))
 
     t0 = datetime.now()
-    got = collect_candidates(vid, tid, ref_emb)
-    keep = got["candidates"][:config.FACE_ENH_MAX_FRAMES]
 
-    # Refuse rather than fabricate.
-    if len(keep) < config.FACE_ENH_MIN_FRAMES:
+    # ---- 1. analyse the WHOLE track and rank every verified appearance --------
+    got = collect_candidates(vid, tid, ref_emb)
+    # ...then look between the sampled frames, which is where a clearer natural
+    # appearance is actually found (see refine_around_best).
+    refine = refine_around_best(vid, got, ref_emb) if got["candidates"] else {}
+    ranked = got["candidates"]
+
+    # Refuse only when the track holds no usable facial evidence at all.
+    if len(ranked) < config.FACE_ENH_MIN_FRAMES:
         return {
             "error": "Insufficient high-quality facial evidence available for "
                      "reliable enhancement.",
             "reason": got.get("reason"),
             "frames_analysed": got["frames_seen"], "faces_found": got["faces_seen"],
-            "frames_selected": len(keep), "rejected": got["rejected"],
+            "frames_selected": 0, "rejected": got["rejected"],
             "identity_threshold": config.FACE_ENH_MIN_IDENTITY,
             "min_face_px": config.FACE_ENH_MIN_PX,
         }
 
-    fused, fusion, used, ccs, stack = _fuse([c["_aligned"] for c in keep])
-    dropped_reg = len(keep) - len(used)
-    keep = [keep[i] for i in used]          # only the views actually in the result
+    # ---- 2. the best NATURAL frame is the primary result ---------------------
+    # Re-cropped from the original recording at TRUE native resolution. If a
+    # clearer appearance exists elsewhere in the track, this is it, and it is a
+    # real photograph rather than anything reconstructed.
+    best = pick_best(ranked)
+    # the fusion pool is ordered around the chosen view, not the composite ranking
+    ranked = [best] + [c for c in ranked if c is not best]
+    natural = faces_gallery._recrop_face_full_res(vid, best["frame_number"],
+                                                  best["frame_bbox"])
+    if natural is None or not natural.size:
+        natural = _align(best["_crop"], best["_kps"], align_size_for(best["face_size"]))
+    if natural is None or not natural.size:
+        return {"error": "Insufficient high-quality facial evidence available for "
+                         "reliable enhancement.",
+                "reason": "the best verified frame could not be re-read from the recording",
+                "frames_analysed": got["frames_seen"], "faces_found": got["faces_seen"],
+                "frames_selected": 0, "rejected": got["rejected"]}
 
-    restored, model = _gfpgan_restore(fused)
+    # ---- 3. build the candidate enhancements (all optional) -----------------
+    canvas = align_size_for(best["face_size"])
+    fuse_pool = fusion_views(ranked)[:config.FACE_ENH_MAX_FRAMES]
+    aligned = [_align(c["_crop"], c["_kps"], canvas) for c in fuse_pool]
+    pairs = [(c, a) for c, a in zip(fuse_pool, aligned) if a is not None and a.size]
+    if not pairs:
+        return {"error": "Insufficient high-quality facial evidence available for "
+                         "reliable enhancement.",
+                "reason": "no verified view could be aligned onto the facial geometry",
+                "frames_analysed": got["frames_seen"], "faces_found": got["faces_seen"],
+                "frames_selected": 0, "rejected": got["rejected"]}
+    fuse_pool = [c for c, _a in pairs]
+    aligned = [a for _c, a in pairs]
+    base = aligned[0]                       # best verified source frame, aligned
+
+    # Only RESTORATIVE candidates are eligible - things that can genuinely add
+    # information (combining several real views, or a trained prior). A plain
+    # unsharp mask is deliberately NOT a candidate: it raises edge energy and
+    # variance-of-Laplacian by construction, so including it made the gate
+    # tautological - it passed on all 13 faces while adding no information. That is
+    # the same trap as upscaling a blurry crop and calling it enhanced.
+    candidates, fusion, ccs, stack, fused = [], "none", [], None, None
+    used = [0]
+    if len(aligned) >= config.FACE_ENH_FUSE_MIN_VIEWS:
+        fused, fusion, used, ccs, stack = _fuse(aligned, config.FACE_ENH_FUSE_MIN_ECC)
+        if fusion == "median":
+            candidates.append(("multi-frame median fusion", fused, "fusion"))
+            candidates.append(("multi-frame fusion + mild unsharp",
+                               _sharpen(fused), "fusion"))
+    # CodeFormer needs the face on its own 512 px canvas, aligned the same way
+    if codeformer_available():
+        a512 = _align(best["_crop"], best["_kps"], config.FACE_ENH_CODEFORMER_SIZE)
+        for w in config.FACE_ENH_CODEFORMER_W:
+            got_cf = _codeformer_restore(a512, w)
+            if got_cf is not None:
+                candidates.append((f"CodeFormer (ONNX) at fidelity w={w}",
+                                   got_cf, "generative"))
+    restored, restore_name = _gfpgan_restore(base)
     if restored is not None:
-        final = restored
-    else:
-        final = _upscale_sharpen(fused, config.FACE_ENH_SCALE)
-        stage = (f"multi-frame median fusion of {len(keep)} verified views"
-                 if fusion == "median" else
-                 "single verified view (no second view available to fuse)")
-        model = (f"{stage} + LANCZOS x{config.FACE_ENH_SCALE} + unsharp "
-                 f"(local, non-generative)")
+        candidates.append((restore_name, restored, "generative"))
 
-    # --------------------------------------------------- write derived evidence
+    # ---- 4. quality gate: accept an enhancement only if it measurably wins ---
+    verdict = _gate(base, candidates, ref_emb)
+    applied = verdict["image"] is not None
+    final = verdict["image"] if applied else natural
+    fused_views = [fuse_pool[i] for i in used] if fusion == "median" else [fuse_pool[0]]
+
+    if applied:
+        row = verdict["chosen_row"]
+        model = verdict["chosen"]
+        label = "AI-Enhanced - Derived Visualisation"
+        gate_reason = (f"accepted: edge detail {row['edge_ratio'] * 100:.0f}% and "
+                       f"sharpness {row['sharpness_ratio'] * 100:.0f}% of the verified "
+                       f"source; identity match {row['identity']}")
+        if verdict["chosen_kind"] == "generative":
+            gate_reason += (f" (generative reconstruction - it moved "
+                            f"{row['identity_drop']} from the saved face, above the "
+                            f"{config.FACE_ENH_GATE_ID_FLOOR} same-person floor)")
+    else:
+        model = ("none - clearest natural frame from the person's track, "
+                 "unmodified (no restoration applied)")
+        label = "Best Available Original Evidence"
+        why = [f"{r['name']}: {'; '.join(r['failed_because'])}"
+               for r in verdict["report"] if not r["passed"]]
+        gate_reason = ("AI enhancement did not improve the verified source image. "
+                       + (" | ".join(why) if why else
+                          "no restoration candidate was available for this track."))
+
+    # ---- 5. write derived evidence (the original is never touched) -----------
     config.ENHANCED_FACE_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     out_path = config.ENHANCED_FACE_DIR / f"enh_{saved_id}_{stamp}.jpg"
     cv2.imwrite(str(out_path), final, [int(cv2.IMWRITE_JPEG_QUALITY), 96])
+    nat_path = config.ENHANCED_FACE_DIR / f"nat_{saved_id}_{stamp}.jpg"
+    cv2.imwrite(str(nat_path), natural, [int(cv2.IMWRITE_JPEG_QUALITY), 96])
 
-    # the exact frames the result was built from, so an investigator can audit it
+    # the exact frames behind the result, so an investigator can audit it
     frames_dir = config.ENHANCED_FACE_DIR / f"src_{saved_id}_{stamp}"
     frames_dir.mkdir(parents=True, exist_ok=True)
     source_frames = []
-    for i, c in enumerate(keep, 1):
+    for i, (c, a) in enumerate(zip(fused_views,
+                                   [aligned[j] for j in (used if fusion == "median" else [0])]), 1):
         p = frames_dir / f"f{i:02d}_frame{c['frame_number']}.jpg"
-        cv2.imwrite(str(p), c["_aligned"], [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+        cv2.imwrite(str(p), a, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
         source_frames.append({k: c[k] for k in
                               ("detection_id", "frame_number", "timestamp", "quality",
                                "face_size", "sharpness", "frontal", "brightness",
                                "occlusion", "det_score", "identity")} | {"path": str(p)})
 
-    # ------------------------------------------------- measurable before/after
-    # Every image is brought to the SAME output resolution first, otherwise a
-    # variance-of-Laplacian comparison is meaningless. Three stages are measured
-    # so the two effects stay separable:
-    #   best_up  - the single best real frame, upscaled          (the "before")
-    #   fused_up - the median of the verified views, upscaled    (what FUSION did)
-    #   final    - after the unsharp mask                        (the "after")
-    # Reporting only before/after would let the unsharp mask take credit for the
-    # fusion, and would make fusion's noise reduction invisible.
-    size = final.shape[1]
-    best_up = cv2.resize(keep[0]["_aligned"], (size, size), interpolation=cv2.INTER_LANCZOS4)
-    fused_up = cv2.resize(fused, (size, size), interpolation=cv2.INTER_LANCZOS4)
+    # ---- 6. measurements ----------------------------------------------------
+    # The headline number is not what restoration did - it is whether searching the
+    # whole track found a CLEARER REAL frame than the one that happened to be
+    # saved. The saved frame is scored by the same 9-factor scorer here, so the
+    # comparison is exact rather than approximate.
+    saved_entry = next((c for c in ranked
+                        if c["detection_id"] == saved.get("detection_id")), None)
+    track_gain = {
+        "saved_frame_quality": round(saved_entry["quality"], 4) if saved_entry else None,
+        "saved_frame_px": saved_entry["face_size"] if saved_entry else None,
+        "better_frame_found": bool(saved_entry and
+                                   best["detection_id"] != saved_entry["detection_id"]),
+        "quality_gain": (round(best["quality"] - saved_entry["quality"], 4)
+                         if saved_entry else None),
+        "px_gain": (int(best["face_size"] - saved_entry["face_size"])
+                    if saved_entry else None),
+    }
 
-    def _noise(img) -> float:
-        g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        return round(float(cv2.absdiff(g, cv2.medianBlur(g, 3)).std()), 3)
-
-    src_px = int(max(c["face_size"] for c in keep))
+    src_px = int(best["face_size"])
     metrics = {
-        "frames_analysed": got["frames_seen"],
-        "faces_found": got["faces_seen"],
-        "frames_selected": len(keep),
+        "track_gain": track_gain,
+        "refine": refine,
+        "best_from_refined": bool(best.get("refined")),
+        "frames_analysed": got["frames_seen"] + (refine.get("frames") or 0),
+        "frames_sampled_pass": got["frames_seen"],
+        "frames_refined_pass": refine.get("frames") or 0,
+        "faces_found": got["faces_seen"] + (refine.get("faces") or 0),
+        "faces_verified": len(ranked),
+        "frames_selected": len(source_frames),
         "rejected": got["rejected"],
         "source_face_px": src_px,
-        "output_px": int(size),
-        "align_size": config.FACE_ENH_ALIGN_SIZE,
+        "natural_px": f"{natural.shape[1]}x{natural.shape[0]}",
+        "output_px": int(final.shape[1]),
+        "align_size": canvas,
         "fusion": fusion,
-        "registration_cc": ccs,             # ECC correlation per extra view
-        "dropped_registration": dropped_reg,
-        "sharpness_best_frame": round(_sharpness(best_up), 2),
-        "sharpness_fused": round(_sharpness(fused_up), 2),
-        "sharpness_enhanced": round(_sharpness(final), 2),
-        # median-residual reading of each stage. Kept, but named for what it
-        # actually measures - high-frequency content, not noise. Rising here is
-        # expected once an unsharp mask is applied and must not be read as a
-        # quality loss (see _noise_stats for the real noise measurement).
-        "detail_best_frame": _noise(best_up),
-        "detail_fused": _noise(fused_up),
-        "detail_enhanced": _noise(final),
-        "identity_min": min([c["identity"] for c in keep if c["identity"] is not None] or [None]),
-        "identity_max": max([c["identity"] for c in keep if c["identity"] is not None] or [None]),
-        "quality_best": round(keep[0]["quality"], 4),
+        "fusion_pool": len(aligned),
+        "registration_cc": ccs,
+        "dropped_registration": (len(aligned) - len(used)) if fusion == "median" else 0,
+        "enhancement_applied": applied,
+        "enhancement_kind": verdict["chosen_kind"],
+        "codeformer_available": codeformer_available(),
+        "gate_base": verdict["base"],
+        "gate_report": verdict["report"],
+        "quality_best": round(best["quality"], 4),
+        "identity_best": best["identity"],
+        "identity_min": min([c["identity"] for c in ranked if c["identity"] is not None] or [None]),
+        "identity_max": max([c["identity"] for c in ranked if c["identity"] is not None] or [None]),
         "elapsed_s": round((datetime.now() - t0).total_seconds(), 2),
-        "note": ("Sharpness rises partly from the unsharp mask, so the fused column "
-                 "shows what the multi-frame step contributed on its own. Noise "
-                 "figures are a half-split measurement and are a conservative floor."),
+        "note": ("Ratios in the gate report are against the best VERIFIED SOURCE frame "
+                 "aligned at the same size, so they isolate what the enhancement step "
+                 "did. Edge energy is the over-smoothing test."),
         **(_noise_stats(stack) if stack is not None else {}),
     }
 
-    # Source quality must reflect how much real facial information the FOOTAGE
-    # held, which is dominated by how many pixels the face occupied. The composite
-    # face score alone rated a 25 px face "High" because size carries only 0.18 of
-    # its weight - misleading on an evidence report, so size leads here.
-    src_q = ("High" if (src_px >= 60 and keep[0]["quality"] >= 0.58) else
-             "Medium" if (src_px >= 30 and keep[0]["quality"] >= 0.48) else "Low")
+    # Source quality reflects how much real facial information the FOOTAGE held,
+    # which is dominated by how many pixels the face occupied. The composite face
+    # score alone rated a 25 px face "High" because size carries only 0.18 of its
+    # weight - misleading on an evidence report, so size leads here.
+    src_q = ("High" if (src_px >= 60 and best["quality"] >= 0.58) else
+             "Medium" if (src_px >= 30 and best["quality"] >= 0.48) else "Low")
 
     rec = {
         "saved_face_id": int(saved_id),
         "source_video_id": vid, "source_track_id": tid,
         "source_camera_id": saved.get("camera_id"),
-        "original_detection_ids": json.dumps([c["detection_id"] for c in keep]),
-        "source_timestamps": json.dumps([c["timestamp"] for c in keep]),
-        "best_source_timestamp": keep[0]["timestamp"],
+        "original_detection_ids": json.dumps([c["detection_id"] for c in fused_views]),
+        "source_timestamps": json.dumps([c["timestamp"] for c in fused_views]),
+        "best_source_timestamp": best["timestamp"],
         "model_name": model,
-        "frames_analysed": got["frames_seen"], "frames_selected": len(keep),
-        "quality_score": round(keep[0]["quality"], 4),
+        "frames_analysed": got["frames_seen"], "frames_selected": len(source_frames),
+        "quality_score": round(best["quality"], 4),
         "source_quality": src_q,
         "original_hash": _sha256(saved.get("face_crop")),
         "enhanced_hash": _sha256(out_path),
         "file_path": str(out_path),
         "source_frames": json.dumps(source_frames),
         "metrics": json.dumps(metrics),
-        "label": "AI-Enhanced - Derived Visualisation",
+        "label": label,
         "created_at": _now(),
+        "best_source_path": str(nat_path),
+        "best_source_frame": best["frame_number"],
+        "best_source_quality": round(best["quality"], 4),
+        "best_source_hash": _sha256(nat_path),
+        "enhancement_applied": 1 if applied else 0,
+        "gate_status": label,
+        "gate_reason": gate_reason,
     }
+    cols = ("saved_face_id", "source_video_id", "source_track_id", "source_camera_id",
+            "original_detection_ids", "source_timestamps", "best_source_timestamp",
+            "model_name", "frames_analysed", "frames_selected", "quality_score",
+            "source_quality", "original_hash", "enhanced_hash", "file_path",
+            "source_frames", "metrics", "label", "created_at", "best_source_path",
+            "best_source_frame", "best_source_quality", "best_source_hash",
+            "enhancement_applied", "gate_status", "gate_reason")
     with database.get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO enhanced_faces (saved_face_id, source_video_id, source_track_id, "
-            " source_camera_id, original_detection_ids, source_timestamps, "
-            " best_source_timestamp, model_name, frames_analysed, frames_selected, "
-            " quality_score, source_quality, original_hash, enhanced_hash, file_path, "
-            " source_frames, metrics, label, created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            tuple(rec[k] for k in (
-                "saved_face_id", "source_video_id", "source_track_id", "source_camera_id",
-                "original_detection_ids", "source_timestamps", "best_source_timestamp",
-                "model_name", "frames_analysed", "frames_selected", "quality_score",
-                "source_quality", "original_hash", "enhanced_hash", "file_path",
-                "source_frames", "metrics", "label", "created_at")))
+            f"INSERT INTO enhanced_faces ({', '.join(cols)}) "
+            f"VALUES ({', '.join('?' * len(cols))})", tuple(rec[k] for k in cols))
         stored = dict(conn.execute("SELECT * FROM enhanced_faces WHERE id=?",
                                    (cur.lastrowid,)).fetchone())
 
-    database.log_audit("face_enhance", query_type="derived-visualisation",
-                       result_count=len(keep),
+    database.log_audit("face_enhance", query_type=label,
+                       result_count=len(source_frames),
                        details={"saved_face_id": saved_id, "model": model,
+                                "enhancement_applied": applied,
                                 "enhanced_hash": rec["enhanced_hash"]})
     out = _row_out(stored)
     out["cached"] = False
