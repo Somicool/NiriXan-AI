@@ -598,8 +598,12 @@ def _gfpgan_restore(img):
 
     Not installed here (basicsr needs torchvision.transforms.functional_tensor,
     removed in torchvision 0.17+; this environment runs 0.20.1). Left wired so the
-    engine is a configuration choice rather than a rewrite. Returns None when
-    unavailable, and the caller falls back to fusion and records which ran."""
+    engine is a configuration choice rather than a rewrite.
+
+    Deliberately run at FACE_ENH_RESTORE_WEIGHT (0.5), not full strength. At weight
+    1.0 GFPGAN regenerates skin texture and facial structure from its prior, which
+    on a 25 px face means inventing the face - and the gate below would reject it
+    for identity drift anyway. Whatever it produces still has to pass the gate."""
     if config.FACE_ENH_MODEL not in ("gfpgan", "auto"):
         return None, None
     try:
