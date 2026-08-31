@@ -546,6 +546,25 @@ FACE_ENH_RESTORE_WEIGHT = 0.5
 FACE_ENH_MODEL = "auto"
 FACE_ENH_GFPGAN_WEIGHTS = str(DATA_DIR / "models" / "GFPGANv1.4.pth")
 
+# --- CodeFormer, run through ONNX Runtime ---
+# This is the actual face-restoration model. It is an ONNX build ON PURPOSE: the
+# PyTorch packages for GFPGAN and CodeFormer both need `basicsr`, which imports
+# torchvision.transforms.functional_tensor (deleted in torchvision 0.17, and this
+# project runs 0.20.1). ONNX Runtime is already installed with a CUDA provider, so
+# the model runs on the GPU without touching the working torch stack at all.
+#
+# Download once (377 MB), stored locally, no cloud service involved:
+#   https://huggingface.co/bluefoxcreation/Codeformer-ONNX
+# Absent file -> the backend simply reports itself unavailable and the pipeline
+# falls back to the best natural frame.
+FACE_ENH_CODEFORMER = str(DATA_DIR / "models" / "codeformer.onnx")
+FACE_ENH_CODEFORMER_SIZE = 512               # the model's fixed input resolution
+# Fidelity weights offered to the quality gate, which then picks whichever result
+# stays closest to the real person. 1.0 = maximum fidelity to the input, 0.0 =
+# maximum generative freedom. Measured per-face here: most faces keep identity best
+# near 1.0, but not all, so both ends are tried rather than one guessed value.
+FACE_ENH_CODEFORMER_W = (1.0, 0.5)
+
 # ------------------------------------------------------------------
 # Processing modes: Fast (default, quick indexing/demos) vs Accurate
 # (full forensic pipeline). Every knob that differs between the two lives here,
