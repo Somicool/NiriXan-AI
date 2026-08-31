@@ -351,31 +351,100 @@ function EnhancePanel({ face }) {
             </div>
           )}
 
+          <div className={'fe-verdict ' + (enh.enhancement_applied ? 'ok' : 'natural')}>
+            <div className="fe-verdict-h">
+              Status: {enh.gate_status || enh.label}
+              <span className="fe-applied">Enhancement applied: {enh.enhancement_applied ? 'Yes' : 'No'}</span>
+            </div>
+            {!enh.enhancement_applied && (
+              <div className="fe-verdict-r">
+                Reason: AI enhancement did not improve the verified source image.
+                The clearest real frame from this person's track is shown instead.
+              </div>
+            )}
+          </div>
+
           <div className="fe-panel">
-            <div className="vi-group-h">Enhancement summary</div>
-            <InfoRow k="Source quality" v={<QualityPill q={enh.source_quality} px={m.source_face_px} />} />
-            <InfoRow k="Frames analysed" v={enh.frames_analysed ?? '—'} />
-            <InfoRow k="Faces found on track" v={m.faces_found ?? '—'} />
-            <InfoRow k="Frames selected" v={`${enh.frames_selected ?? '—'}${m.dropped_registration ? ` (${m.dropped_registration} dropped in alignment)` : ''}`} />
+            <div className="vi-group-h">Track analysis</div>
+            <InfoRow k="Faces analysed" v={m.faces_found ?? '—'} />
+            <InfoRow k="Verified as this person" v={m.faces_verified ?? '—'} />
+            <InfoRow k="Frames examined" v={m.frames_analysed != null
+              ? `${m.frames_analysed} (${m.frames_sampled_pass} indexed + ${m.frames_refined_pass} re-read at native rate)`
+              : '—'} />
+            <InfoRow k="Best source frame" v={enh.best_source_frame != null
+              ? `frame ${enh.best_source_frame}${m.best_from_refined ? ' — never indexed until now' : ''}` : '—'} />
             <InfoRow k="Best source timestamp" v={fmtTs(enh.best_source_timestamp)} />
+            <InfoRow k="Best source quality score" v={enh.best_source_quality != null
+              ? `${enh.best_source_quality} (${Math.round(enh.best_source_quality * 100)}%)` : '—'} />
+            <InfoRow k="Source quality" v={<QualityPill q={enh.source_quality} px={m.source_face_px} />} />
+            <InfoRow k="Versus the saved frame" v={!t.better_frame_found
+              ? 'Same frame — the saved one is already the best view in this track'
+              : <span>
+                  <b style={{ color: 'var(--fp-success)' }}>Different frame selected</b>
+                  {' — '}face {t.saved_frame_px} px → {m.source_face_px} px,
+                  quality {t.saved_frame_quality} → {m.quality_best}
+                  {t.px_gain > 0 && t.quality_gain < 0 &&
+                    <span className="fe-dim"> (larger face preferred over a marginally
+                      higher composite score)</span>}
+                </span>} />
+            <InfoRow k="Native crop" v={m.natural_px || '—'} />
             <InfoRow k="Enhancement method" v={enh.model_name || '—'} />
-            <InfoRow k="Status" v={<span className="fe-status">Derived AI Enhancement</span>} />
-            <InfoRow k="Face resolution" v={`${m.source_face_px ?? '?'} px source → ${m.output_px ?? '?'} px output`} />
-            <InfoRow k="Identity agreement" v={m.identity_min != null ? `${m.identity_min.toFixed(2)} – ${m.identity_max.toFixed(2)} cosine` : '—'} />
+            {enh.enhancement_applied && (
+              <InfoRow k="Enhancement type" v={m.enhancement_kind === 'generative'
+                ? <span style={{ color: 'var(--fp-warn)' }}>Generative reconstruction — pixels are
+                    synthesised by a trained model, not recovered from the footage</span>
+                : 'Multi-frame — built only from real pixels across several views'} />
+            )}
+            {enh.enhancement_applied && chosen && (
+              <InfoRow k="Reconstruction vs saved face" v={<span>
+                <b style={{ color: chosen.identity >= 0.7 ? 'var(--fp-success)' : 'var(--fp-warn)' }}>
+                  {chosen.identity} cosine
+                </b>
+                {chosen.identity_drop != null &&
+                  <span className="fe-dim"> — moved {chosen.identity_drop} from the real frame</span>}
+              </span>} />
+            )}
+            <InfoRow k="Identity agreement" v={m.identity_min != null
+              ? `${m.identity_min.toFixed(2)} – ${m.identity_max.toFixed(2)} cosine` : '—'} />
             <InfoRow k="Processing time" v={m.elapsed_s != null ? `${m.elapsed_s} s` : '—'} />
 
-            <div className="vi-group-h" style={{ marginTop: 14 }}>Measured effect</div>
-            {m.noise_reduction_pct != null ? (
+            {(m.gate_report || []).length > 0 && (
               <>
+                <div className="vi-group-h" style={{ marginTop: 14 }}>Quality gate</div>
+                <div className="fe-note" style={{ marginTop: 0, marginBottom: 8 }}>
+                  Every candidate is measured against the best verified source frame at
+                  identical size. Ratios below 100% mean the candidate lost detail.
+                </div>
+                <table className="fe-gate">
+                  <thead><tr><th>Candidate</th><th>Edge</th><th>Sharp</th><th>Identity</th><th /></tr></thead>
+                  <tbody>
+                    {m.gate_report.map((r, i) => (
+                      <tr key={i} className={r.passed ? 'pass' : 'fail'}>
+                        <td>{r.name}{r.kind === 'generative' && <span className="fe-dim"> · generative</span>}</td>
+                        <td>{Math.round((r.edge_ratio || 0) * 100)}%</td>
+                        <td>{Math.round((r.sharpness_ratio || 0) * 100)}%</td>
+                        <td>{r.identity != null ? r.identity.toFixed(2) : '—'}</td>
+                        <td>{r.passed ? 'accepted' : 'rejected'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {m.gate_report.filter((r) => !r.passed).map((r, i) => (
+                  <div className="fe-note" key={'w' + i}>{r.name}: {r.failed_because.join('; ')}</div>
+                ))}
+              </>
+            )}
+            {/* Only shown when fusion was actually ACCEPTED. Reporting a noise
+                reduction from a fusion the gate threw away implies a benefit that
+                was never taken. */}
+            {enh.enhancement_applied && m.noise_reduction_pct != null && (
+              <>
+                <div className="vi-group-h" style={{ marginTop: 14 }}>Multi-frame measurement</div>
                 <InfoRow k="Noise, single frame" v={`${m.noise_single_frame} grey levels`} />
                 <InfoRow k="Noise after fusion" v={`${m.noise_fused_halfsplit} grey levels`} />
-                <InfoRow k="Noise reduction" v={<b style={{ color: 'var(--fp-success)' }}>{m.noise_reduction_pct}%</b>} />
+                <InfoRow k="Noise reduction" v={`${m.noise_reduction_pct}%`} />
               </>
-            ) : (
-              <div className="fe-note">Too few verified views on this track to measure noise
-                reduction, so no figure is claimed.</div>
             )}
-            <InfoRow k="Sharpness" v={`${m.sharpness_best_frame} → ${m.sharpness_enhanced} (variance of Laplacian)`} />
             {m.note && <div className="fe-note">{m.note}</div>}
 
             <div className="vi-group-h" style={{ marginTop: 14 }}>Chain of custody</div>
@@ -383,7 +452,8 @@ function EnhancePanel({ face }) {
             <InfoRow k="Source track" v={enh.source_track_id != null ? `track ${enh.source_track_id}` : '—'} />
             <InfoRow k="Source camera" v={enh.source_camera_id || '—'} />
             <InfoRow k="Original SHA-256" v={<code className="fe-hash">{enh.original_hash || 'original file not on disk'}</code>} />
-            <InfoRow k="Enhanced SHA-256" v={<code className="fe-hash">{enh.enhanced_hash || '—'}</code>} />
+            <InfoRow k="Best source SHA-256" v={<code className="fe-hash">{enh.best_source_hash || '—'}</code>} />
+            <InfoRow k="Result SHA-256" v={<code className="fe-hash">{enh.enhanced_hash || '—'}</code>} />
             <InfoRow k="Enhanced at" v={fmtDate(enh.created_at)} />
 
             <button className="fe-frames-h" onClick={() => setOpenFrames(!openFrames)}>
@@ -407,10 +477,28 @@ function EnhancePanel({ face }) {
           </div>
 
           <div className="fe-warn">
-            ⚠ This image is a <b>derived visualisation</b>, not a photograph of the subject.
-            It is reconstructed from {enh.frames_selected} verified view{enh.frames_selected === 1 ? '' : 's'} of
-            a {m.source_face_px}&nbsp;px face. Treat it as an investigative aid, never as
-            identification on its own. The original crop above it is unaltered.
+            {enh.enhancement_applied ? (
+              m.enhancement_kind === 'generative' ? (
+                <>⚠ The third image is a <b>machine reconstruction</b>, not a photograph.
+                  A model trained on sharp faces has drawn a plausible face consistent with
+                  a {m.source_face_px}&nbsp;px source — so most of the fine detail you see
+                  was <b>generated, not captured</b>. It scores {chosen?.identity} against the
+                  saved face, above the {m.gate_base ? '0.50' : '0.50'} same-person floor but
+                  clearly moved from it. Use it to guide a search, never as identification.
+                  The middle image is the real evidence.</>
+              ) : (
+                <>⚠ The third image is a <b>derived visualisation</b> built from
+                  {' '}{enh.frames_selected} verified view{enh.frames_selected === 1 ? '' : 's'} of
+                  a {m.source_face_px}&nbsp;px face. Every pixel comes from real frames, but
+                  treat it as an investigative aid rather than identification on its own.</>
+              )
+            ) : (
+              <>✓ No AI reconstruction was used. The result is a <b>real frame</b> from the
+                recording at {m.natural_px}, chosen from {m.faces_verified} appearances
+                verified as this person. Restoration was measured against it and rejected
+                for losing detail, so nothing here is invented.</>
+            )}
+            {' '}The original saved crop is unaltered.
           </div>
         </>
       )}
