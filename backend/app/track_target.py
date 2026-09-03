@@ -215,3 +215,85 @@ def iter_window(cap, start: int, stop: int, step: int):
             if not cap.grab():
                 return
             pos += 1
+
+
+def _analyse_frames(cap, start, stop, step, reference, fw, fh, native_fps):
+    """Detect people on each sampled frame and score them against the target.
+
+    Returns one record per analysed frame holding EVERY candidate's similarity, so
+    the decision that follows can be audited rather than trusted.
+
+    Frames are processed in BATCHES. One predict() per frame was the second big
+    cost after seeking - the GPU sat idle between calls - so a chunk of frames goes
+    through YOLO in a single call and every crop from that chunk goes through ReID
+    in one more. Same results, far fewer round-trips."""
+    from .ingestion import detector, reid_embedder
+
+    model = detector.get_model()
+    wanted = set(config.PERSON_CLASSES)
+    batch = max(1, int(config.TRACK_TARGET_BATCH))
+    out = []
+    _t0 = time.time()
+    pending: list[tuple[int, "np.ndarray"]] = []
+
+    def flush():
+        if not pending:
+            return
+        frames = [f for _n, f in pending]
+        results = model.predict(frames, conf=config.TRACK_TARGET_DET_CONF,
+                                device=config.DEVICE, imgsz=config.TRACK_TARGET_IMGSZ,
+                                classes=sorted(wanted), verbose=False)
+        crops, owner = [], []
+        h_lo, h_hi = reference.get("h_lo"), reference.get("h_hi")
+        for k, (r, (fno, frame)) in enumerate(zip(results, pending)):
+            H, W = frame.shape[:2]
+            if r.boxes is None:
+                continue
+            boxes = []
+            for b in r.boxes:
+                if int(b.cls[0]) not in wanted:
+                    continue
+                x1, y1, x2, y2 = (float(v) for v in b.xyxy[0].tolist())
+                cx1, cy1 = max(0, int(x1)), max(0, int(y1))
+                cx2, cy2 = min(W, int(x2)), min(H, int(y2))
+                if cx2 - cx1 < 12 or cy2 - cy1 < 24:
+                    continue
+                boxes.append((cx1, cy1, cx2, cy2, round(float(b.conf[0]), 4)))
+            # SIZE gate: skip people at an implausible distance before paying for
+            # their embedding. Falls back to the largest few if it rejects all.
+            if h_lo is not None and h_hi is not None and boxes:
+                keep = [bx for bx in boxes if h_lo <= (bx[3] - bx[1]) <= h_hi]
+                if len(keep) < config.TRACK_TARGET_MIN_CANDS:
+                    extra = sorted((bx for bx in boxes if bx not in keep),
+                                   key=lambda bx: bx[3] - bx[1], reverse=True)
+                    keep += extra[:config.TRACK_TARGET_MIN_CANDS - len(keep)]
+                boxes = keep
+            for cx1, cy1, cx2, cy2, conf in boxes:
+                c = frame[cy1:cy2, cx1:cx2]
+                if c is None or not c.size:
+                    continue
+                crops.append(c)
+                owner.append((k, [float(cx1), float(cy1),
+                                  float(cx2 - cx1), float(cy2 - cy1)], conf))
+        embs = reid_embedder.embed_persons(crops) if crops else []
+        per_frame: dict[int, list] = {k: [] for k in range(len(pending))}
+        for (k, box, conf), emb in zip(owner, embs):
+            per_frame[k].append({"bbox": box, "det_conf": conf,
+                                 "sim": round(_similarity(reference, emb), 4)})
+        for k, (fno, _f) in enumerate(pending):
+            cands = sorted(per_frame.get(k, []), key=lambda c: c["sim"], reverse=True)
+            out.append({"frame": fno,
+                        "offset": round(fno / native_fps, 3) if native_fps else None,
+                        "candidates": cands})
+        pending.clear()
+
+    for fno, frame in iter_window(cap, start, stop, step):
+        pending.append((fno, frame))
+        if len(pending) >= batch:
+            flush()
+            if config.TRACK_TARGET_DEBUG and len(out) % 120 < batch:
+                print(f"[track_target] {len(out)} frames analysed "
+                      f"({time.time() - _t0:.0f}s)", flush=True)
+    flush()
+    out.sort(key=lambda r: r["frame"])
+    return out
