@@ -410,3 +410,50 @@ def _decide(records, fw, fh, stride_s):
                           "reason": reason})
 
     return points, debug, reacquisitions
+
+
+def _bridge(points, stride_s, fw, fh):
+    """Fill only single-sample holes where the person barely moved.
+
+    At TRACK_TARGET_FPS a one-sample hole is a fraction of a second, so filling it
+    keeps the overlay steady through a momentary miss. Anything longer is left
+    empty: a longer guess is what used to slide the box across other people."""
+    if len(points) < 2 or stride_s <= 0:
+        return points
+    diag = math.hypot(fw or 1920, fh or 1080)
+    limit = 0.06 * diag
+    out = [points[0]]
+    for a, b in zip(points, points[1:]):
+        gap = (b["offset_seconds"] or 0) - (a["offset_seconds"] or 0)
+        steps = int(round(gap / stride_s)) - 1
+        if steps == 1 and gap <= config.TRACK_TARGET_BRIDGE_S:
+            ca, cb = _centre(a["bbox"]), _centre(b["bbox"])
+            if math.hypot(cb[0] - ca[0], cb[1] - ca[1]) <= limit:
+                out.append({"offset_seconds": round((a["offset_seconds"] + b["offset_seconds"]) / 2, 3),
+                            "frame_number": None,
+                            "bbox": [round((a["bbox"][i] + b["bbox"][i]) / 2, 2) for i in range(4)],
+                            "confidence": None,
+                            "identity": min(a["identity"], b["identity"]),
+                            "status": "continued", "predicted": True})
+        out.append(b)
+    return out
+
+
+# ------------------------------------------------------------------ public API
+def _cache_get(video_id, ref_id):
+    with database.get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM target_tracks WHERE video_id=? AND ref_detection_id=? "
+            "AND version=?", (video_id, ref_id, config.TRACK_TARGET_VERSION)).fetchone()
+    return dict(row) if row else None
+
+
+def _out(row: dict, cached: bool) -> dict:
+    for k in ("points", "debug", "metrics", "reference_views"):
+        if row.get(k):
+            try:
+                row[k] = json.loads(row[k])
+            except (TypeError, ValueError):
+                row[k] = None
+    row["cached"] = cached
+    return row
