@@ -457,3 +457,144 @@ def _out(row: dict, cached: bool) -> dict:
                 row[k] = None
     row["cached"] = cached
     return row
+
+
+def retrack(detection_id: int, force: bool = False) -> dict:
+    """Re-analyse the source video for the identity behind `detection_id`.
+
+    On-demand only. Never called during ingestion."""
+    refs = database.get_detections([detection_id])
+    if not refs:
+        return {"error": "Detection not found."}
+    ref = refs[0]
+    vid = ref.get("video_id")
+
+    if not force:
+        c = _cache_get(vid, detection_id)
+        if c:
+            return _out(c, True)
+
+    reference = build_reference(detection_id)
+    if not reference:
+        return {"error": "No usable identity embedding for this person - cannot "
+                         "verify the target, so no box is drawn.",
+                "points": []}
+
+    vpath = faces_gallery.source_video_path(vid)
+    if vpath is None:
+        return {"error": "The original recording is no longer on disk.", "points": []}
+
+    vindex = track_path._video_index()
+    v = vindex.get(vid) or {}
+    native = float(v.get("native_fps") or 25.0)
+    fw, fh = v.get("width"), v.get("height")
+    duration = float(v.get("duration") or 0.0)
+
+    # Window: the indexed appearance, padded. The stored track tells us WHERE to
+    # look - that is all it is trusted for.
+    lo = max(0.0, (reference["known_from"] or 0.0) - config.TRACK_TARGET_PAD_S)
+    hi = (reference["known_to"] or duration or 0.0) + config.TRACK_TARGET_PAD_S
+    if duration:
+        hi = min(hi, duration)
+    step = max(1, int(round(native / config.TRACK_TARGET_FPS)))
+    f_start, f_stop = int(lo * native), int(hi * native)
+    # widen the stride rather than truncating the window, so a long appearance is
+    # still covered end to end - just sampled a little more coarsely
+    n_frames = (f_stop - f_start) // step + 1
+    if n_frames > config.TRACK_TARGET_MAX_FRAMES:
+        step = max(step, int(math.ceil((f_stop - f_start + 1)
+                                      / config.TRACK_TARGET_MAX_FRAMES)))
+    stride_s = step / native
+
+    t0 = time.time()
+    cap = cv2.VideoCapture(str(vpath))
+    if not cap.isOpened():
+        cap.release()
+        return {"error": "The original recording could not be opened.", "points": []}
+    try:
+        records = _analyse_frames(cap, f_start, f_stop, step, reference, fw, fh, native)
+    finally:
+        cap.release()
+
+    points, debug, reacq = _decide(records, fw, fh, stride_s)
+    points = _bridge(points, stride_s, fw, fh)
+    elapsed = round(time.time() - t0, 2)
+
+    # contiguous stretches with no verified box, inside the analysed window
+    lost = []
+    for a, b in zip(points, points[1:]):
+        gap = (b["offset_seconds"] or 0) - (a["offset_seconds"] or 0)
+        if gap > max(2.5 * stride_s, config.TRACK_TARGET_BRIDGE_S):
+            lost.append([round(a["offset_seconds"], 2), round(b["offset_seconds"], 2)])
+
+    confirmed = sum(1 for p in points if p["status"] in ("confirmed", "reacquired"))
+    sims = [p["identity"] for p in points if p.get("identity") is not None]
+    metrics = {
+        "analysis_fps": round(native / step, 2),
+        "native_fps": round(native, 3),
+        "window": [round(lo, 2), round(hi, 2)],
+        "frames_analysed": len(records),
+        "frames_with_target": len([p for p in points if not p["predicted"]]),
+        "coverage_pct": round(100.0 * len([p for p in points if not p["predicted"]])
+                              / max(len(records), 1), 1),
+        # Coverage over the window is misleading on short appearances: the window is
+        # padded by TRACK_TARGET_PAD_S either side, and the person genuinely is not
+        # on camera there. A 1.6 s appearance inside a 9.6 s window scored 5.3% while
+        # actually being found whenever they were present. This is the honest figure -
+        # verified frames as a share of frames inside the INDEXED appearance.
+        "coverage_in_span_pct": round(
+            100.0 * len([p for p in points if not p["predicted"]
+                         and reference["known_from"] is not None
+                         and reference["known_from"] - stride_s <= (p["offset_seconds"] or 0)
+                         <= (reference["known_to"] or 0) + stride_s])
+            / max(len([r for r in records
+                       if reference["known_from"] is not None
+                       and reference["known_from"] - stride_s <= (r["offset"] or 0)
+                       <= (reference["known_to"] or 0) + stride_s]), 1), 1),
+        "indexed_span": [round(reference["known_from"], 2) if reference["known_from"] is not None else None,
+                         round(reference["known_to"], 2) if reference["known_to"] is not None else None],
+        "confirmed": confirmed,
+        "continued": sum(1 for p in points if p["status"] == "continued"),
+        "reacquisitions": reacq,
+        "lost_segments": len(lost),
+        "lost_spans": lost,
+        "predicted_boxes": sum(1 for p in points if p["predicted"]),
+        "identity_mean": round(float(np.mean(sims)), 4) if sims else None,
+        "identity_min": round(float(np.min(sims)), 4) if sims else None,
+        "thresholds": {"confirm": config.TRACK_TARGET_CONFIRM_SIM,
+                       "continue": config.TRACK_TARGET_CONTINUE_SIM,
+                       "reacquire": config.TRACK_TARGET_REACQUIRE_SIM,
+                       "margin": config.TRACK_TARGET_MIN_MARGIN},
+        "elapsed_s": elapsed,
+    }
+
+    rec = {
+        "video_id": vid, "ref_detection_id": detection_id,
+        "ref_track_id": reference.get("track_id"),
+        "version": config.TRACK_TARGET_VERSION,
+        "reference_views": json.dumps(list(reference["view_ids"])),
+        "frames_analysed": len(records), "frames_confirmed": confirmed,
+        "lost_segments": len(lost), "reacquisitions": reacq,
+        "start_offset": points[0]["offset_seconds"] if points else None,
+        "end_offset": points[-1]["offset_seconds"] if points else None,
+        "elapsed_s": elapsed,
+        "points": json.dumps(points),
+        "debug": json.dumps(debug[:1200]),
+        "metrics": json.dumps(metrics),
+        "created_at": datetime.now(timezone.utc).astimezone().isoformat(),
+    }
+    cols = tuple(rec)
+    with database.get_conn() as conn:
+        conn.execute(
+            f"INSERT OR REPLACE INTO target_tracks ({', '.join(cols)}) "
+            f"VALUES ({', '.join('?' * len(cols))})", tuple(rec[k] for k in cols))
+        row = dict(conn.execute(
+            "SELECT * FROM target_tracks WHERE video_id=? AND ref_detection_id=? "
+            "AND version=?", (vid, detection_id, config.TRACK_TARGET_VERSION)).fetchone())
+
+    database.log_audit("track_target", query_type="query-time-retrack",
+                       result_count=confirmed,
+                       details={"detection_id": detection_id, "video_id": vid,
+                                "coverage_pct": metrics["coverage_pct"],
+                                "reacquisitions": reacq})
+    return _out(row, False)
