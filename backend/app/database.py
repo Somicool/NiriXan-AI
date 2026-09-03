@@ -294,6 +294,33 @@ CREATE TABLE IF NOT EXISTS enhanced_faces (
     gate_reason            TEXT
 );
 
+-- Track Person: cached QUERY-TIME target-specific tracking passes
+-- (see app/track_target.py). This is NOT the ingestion track - it is a re-analysis
+-- of the source video for one selected identity, and is keyed on the reference
+-- detection plus a logic version so changing the matcher invalidates old results
+-- instead of serving them. Purely additive; the ingestion `detections` rows and
+-- their track_ids are never modified.
+CREATE TABLE IF NOT EXISTS target_tracks (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id          INTEGER,
+    ref_detection_id  INTEGER,
+    ref_track_id      INTEGER,
+    version           INTEGER,       -- config.TRACK_TARGET_VERSION
+    reference_views   TEXT,          -- JSON: detection ids forming the identity
+    frames_analysed   INTEGER,
+    frames_confirmed  INTEGER,
+    lost_segments     INTEGER,
+    reacquisitions    INTEGER,
+    start_offset      REAL,
+    end_offset        REAL,
+    elapsed_s         REAL,
+    points            TEXT,          -- JSON: per-frame boxes + status
+    debug             TEXT,          -- JSON: per-frame decision audit
+    metrics           TEXT,          -- JSON
+    created_at        TEXT,
+    UNIQUE (video_id, ref_detection_id, version)
+);
+
 CREATE INDEX IF NOT EXISTS idx_enh_saved ON enhanced_faces(saved_face_id);
 CREATE INDEX IF NOT EXISTS idx_case_ev ON case_evidence(case_key, position);
 CREATE INDEX IF NOT EXISTS idx_det_camera ON detections(camera_id);
