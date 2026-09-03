@@ -314,7 +314,26 @@ export default function TrackingViewer({ detection, onClose, onAddEvidence, inEv
             <InfoRow label="Object" value={path?.class_label || '—'} />
             <InfoRow label="Duration" value={path?.duration != null ? `${path.duration.toFixed(1)}s` : '—'} sub={hasBoxes ? `${fmt(start)} → ${fmt(end)}` : null} />
             <InfoRow label="Confidence" value={path?.max_confidence != null ? `${Math.round(path.max_confidence * 100)}% peak` : '—'} sub={path?.avg_confidence != null ? `${Math.round(path.avg_confidence * 100)}% avg` : null} />
-            <InfoRow label="Tracked frames" value={hasBoxes ? String(path.points.length) : '0'} />
+            <InfoRow label={verified?.source === 'target' ? 'Verified boxes' : 'Tracked frames'}
+                     value={hasBoxes ? String(path.points.length) : '0'}
+                     sub={verified?.source === 'target'
+                       ? `${verified.coverage_in_span_pct ?? verified.coverage_pct}% of the indexed appearance · ${verified.frames_analysed} frames re-analysed at ${verified.analysis_fps} fps`
+                       : verified?.refining
+                         ? 'indexed track — verifying against the selected identity…'
+                         : 'replayed from indexed metadata'} />
+            {verified?.source === 'target' && (
+              <>
+                <InfoRow label="Identity match" value={verified.identity_mean != null
+                  ? `${verified.identity_mean} mean` : '—'}
+                         sub={`confirm ≥ ${verified.thresholds?.confirm}, reacquire ≥ ${verified.thresholds?.reacquire}`} />
+                <InfoRow label="Lock events" value={`${verified.reacquisitions} reacquired`}
+                         sub={`${verified.lost_segments} temporarily-lost gap(s)`} />
+              </>
+            )}
+            {verified?.source === 'stored' && !verified.refining && (
+              <InfoRow label="Source" value="Indexed track"
+                       sub={verified.reason || 'identity verification unavailable for this person'} />
+            )}
 
             {(attrs && Object.keys(attrs).length > 0) && (
               <>
@@ -331,7 +350,10 @@ export default function TrackingViewer({ detection, onClose, onAddEvidence, inEv
                 {inEvidence?.(detId) ? '✓ In evidence' : '＋ Add to evidence'}
               </button>
             )}
-            <div className="tv-note">Replayed from stored ByteTrack data — no AI re-run.</div>
+            <div className="tv-note">{verified?.source === 'target'
+              ? 'Re-analysed from the original recording for this identity. A box is '
+                + 'drawn only where the person is verified — gaps mean uncertain, not absent.'
+              : 'Replayed from stored ByteTrack data — no AI re-run.'}</div>
           </aside>
         </div>
       </div>
