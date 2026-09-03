@@ -172,3 +172,46 @@ def build_reference(detection_id: int) -> dict:
             "h_lo": h_lo, "h_hi": h_hi,
             "appearances": len(segments),
             "track_span": [stamped[0][0], stamped[-1][0]] if stamped else None}
+
+
+def _similarity(reference: dict, emb) -> float:
+    """Best-of-set similarity, softened by the set mean.
+
+    Best-of-set alone lets one lucky reference view carry a poor match; the mean
+    alone punishes legitimate pose changes. 0.7/0.3 is the same blend the stored
+    path already used, kept so the two agree."""
+    u = _unit(emb)
+    if u is None:
+        return 0.0
+    s = reference["views"] @ u
+    return float(0.7 * s.max() + 0.3 * s.mean()) if s.size > 1 else float(s.max())
+
+
+# ----------------------------------------------------------------- the pass
+def iter_window(cap, start: int, stop: int, step: int):
+    """Yield (frame_number, frame) across a window, decoding SEQUENTIALLY.
+
+    One seek to the window start, then plain reads with cheap grab() skips. This
+    matters enormously: faces_gallery._FrameReader seeks per frame, which costs
+    ~128 ms on these 1080p clips because the decoder re-finds the preceding
+    keyframe every time. At 6 FPS over a 100 s window that is ~78 s of pure
+    seeking, which made the first version of this pass unusably slow.
+
+    Sequential reading is also MORE frame-exact here, not less. The known problem
+    with decode-skipping is deriving a skip count from a post-seek position; this
+    counts every frame it consumes itself, so the numbering cannot drift."""
+    cap.set(cv2.CAP_PROP_POS_FRAMES, int(max(0, start)))
+    try:                                  # a seek may land on a nearby keyframe
+        pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+    except Exception:
+        pos = int(max(0, start))
+    while pos <= stop:
+        got, frame = cap.read()
+        if not got or frame is None:
+            return
+        yield pos, frame
+        pos += 1
+        for _ in range(step - 1):         # skip without decoding to BGR
+            if not cap.grab():
+                return
+            pos += 1
