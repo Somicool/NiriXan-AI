@@ -13,7 +13,7 @@
 // single track "path" object, so a future multi-camera timeline can feed it a
 // stitched path (or swap clips) without changing the overlay/controls core.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { getTrackPath } from '../api'
+import { getTargetTrack, getTrackPath } from '../api'
 
 const SPEEDS = [0.25, 0.5, 1, 2, 4]
 
@@ -25,6 +25,8 @@ export default function TrackingViewer({ detection, onClose, onAddEvidence, inEv
   const [speed, setSpeed] = useState(1)
   const [showBox, setShowBox] = useState(true)
   const [curTime, setCurTime] = useState(0)
+  const [verified, setVerified] = useState(null)   // metrics from the target pass
+  const [status, setStatus] = useState(null)       // live per-frame lock state
 
   const videoRef = useRef(null)
   const boxRef = useRef(null)
@@ -33,16 +35,79 @@ export default function TrackingViewer({ detection, onClose, onAddEvidence, inEv
   const rafRef = useRef(0)
   const showBoxRef = useRef(true)
   showBoxRef.current = showBox
+  // read inside the rAF paint loop, which must not re-subscribe on every render
+  const verifiedRef = useRef(null)
+  const statusRef = useRef(null)
 
   const detId = detection?.detection_id
 
-  // ---- load the track path (metadata only) ----
+  // ---- load the track ----
+  // Preferred source is the QUERY-TIME target pass: it re-detects people in the
+  // original recording at ~5 FPS and only emits a box where the candidate is
+  // verified as the selected person. The stored ~2 FPS ingestion path is kept as a
+  // fallback for anything the target pass cannot handle (no usable identity
+  // embedding, source video missing), so the viewer never comes up empty.
   useEffect(() => {
     let alive = true
-    setLoading(true); setError(null); setPath(null)
-    getTrackPath(detId)
-      .then((p) => { if (alive) { setPath(p); setLoading(false) } })
-      .catch((e) => { if (alive) { setError(e?.response?.data?.detail || e.message || 'Could not load track'); setLoading(false) } })
+    setLoading(true); setError(null); setPath(null); setVerified(null); setStatus(null)
+    if (detId == null) { setLoading(false); return }
+    verifiedRef.current = null; statusRef.current = null
+    ;(async () => {
+      // Stage 1: the indexed track, immediately. This is metadata only, so the clip
+      // is playable in well under a second. Waiting for the verification pass before
+      // showing anything meant staring at a spinner for ~50 s with no video.
+      let meta = null
+      try {
+        meta = await getTrackPath(detId)
+      } catch (e) {
+        if (alive) {
+          setError(e?.response?.data?.detail || e.message || 'Could not load track')
+          setLoading(false)
+        }
+        return
+      }
+      if (!alive) return
+      setPath(meta)
+      setVerified({ source: 'stored', refining: true })
+      setLoading(false)
+
+      // Stage 2: upgrade to the verified target pass in the background, then swap
+      // the boxes in. The video keeps playing throughout.
+      const r = await getTargetTrack(detId)
+      if (!alive) return
+      if (r.ok && (r.data?.points || []).length) {
+        const d = r.data
+        const pts = d.points.map((p) => ({
+          detection_id: detId,
+          offset_seconds: p.offset_seconds,
+          frame_number: p.frame_number,
+          timestamp: null,
+          bbox: p.bbox,
+          confidence: p.confidence,
+          predicted: !!p.predicted,
+          status: p.status,
+          identity: p.identity,
+        }))
+        setPath({
+          ...meta,
+          points: pts,
+          start_offset: d.start_offset,
+          end_offset: d.end_offset,
+          duration: (d.end_offset != null && d.start_offset != null)
+            ? Number((d.end_offset - d.start_offset).toFixed(3)) : meta.duration,
+          detected_points: (d.metrics || {}).frames_with_target,
+          predicted_points: (d.metrics || {}).predicted_boxes,
+          lost_spans: (d.metrics || {}).lost_spans || [],
+          identity_confidence: (d.metrics || {}).identity_mean,
+        })
+        const vm = { ...(d.metrics || {}), cached: d.cached, source: 'target' }
+        setVerified(vm); verifiedRef.current = vm
+        return
+      }
+      // verification unavailable for this person: keep the indexed track, and say so
+      setVerified({ source: 'stored', refining: false,
+                    reason: r.detail?.error || null })
+    })()
     return () => { alive = false }
   }, [detId])
 
