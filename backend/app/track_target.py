@@ -598,3 +598,14 @@ def retrack(detection_id: int, force: bool = False) -> dict:
                                 "coverage_pct": metrics["coverage_pct"],
                                 "reacquisitions": reacq})
     return _out(row, False)
+
+
+def invalidate(video_id=None) -> dict:
+    """Drop cached passes (e.g. after changing the matcher)."""
+    with database.get_conn() as conn:
+        if video_id is None:
+            n = conn.execute("DELETE FROM target_tracks").rowcount
+        else:
+            n = conn.execute("DELETE FROM target_tracks WHERE video_id=?",
+                             (video_id,)).rowcount
+    return {"deleted": n}
