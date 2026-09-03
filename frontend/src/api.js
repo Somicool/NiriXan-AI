@@ -106,6 +106,21 @@ export async function trackDetection(detectionId) {
 
 // Per-frame ByteTrack trajectory of a detection's track within its own clip
 // (interactive tracking viewer). Reads stored metadata only - no AI re-run.
+//
+// Track Person: re-analyse the ORIGINAL video for this one selected identity,
+// rather than replaying the ~2 FPS boxes stored at ingest time. On-demand and
+// cached server-side. Returns { ok, data } so a refusal (no usable identity
+// embedding) is handled as a result rather than thrown.
+export async function getTargetTrack(detectionId, force = false) {
+  try {
+    const { data } = await api.get(`/track/${detectionId}/target?force=${force}`)
+    return { ok: true, data }
+  } catch (e) {
+    const d = e?.response?.data?.detail
+    return { ok: false, detail: typeof d === 'object' ? d : { error: d || 'Tracking failed.' } }
+  }
+}
+
 export async function getTrackPath(detectionId) {
   const { data } = await api.get(`/track/${detectionId}/path`)
   return data
