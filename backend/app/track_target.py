@@ -297,3 +297,116 @@ def _analyse_frames(cap, start, stop, step, reference, fw, fh, native_fps):
     flush()
     out.sort(key=lambda r: r["frame"])
     return out
+
+
+def _decide(records, fw, fh, stride_s):
+    """Target-lock state machine over the scored candidates.
+
+    Per frame the best candidate is accepted only if the identity evidence
+    supports it at the level the current state demands:
+
+      CONFIRMED    sim >= CONFIRM_SIM and it beats the runner-up by MIN_MARGIN
+      CONTINUED    sim >= CONTINUE_SIM, motion is plausible from the last accepted
+                   box, and the margin holds - medium confidence, held not claimed
+      REACQUIRED   the target was lost; needs REACQUIRE_SIM, which is strictly
+                   higher than continuation
+      LOST         nothing cleared the bar, or two candidates were too close to
+                   separate. No box is emitted.
+
+    Motion is only ever a veto or a supporting condition. There is no branch in
+    which proximity alone produces a box, so a passer-by cannot inherit the
+    overlay. Where the margin is too small the previous target is kept ONLY if
+    identity still supports it; otherwise the frame is marked lost.
+    """
+    diag = math.hypot(fw or 1920, fh or 1080)
+    max_step = config.TRACK_TARGET_MAX_SPEED_DIAG * diag * max(stride_s, 1e-3)
+
+    points, debug = [], []
+    last_box = last_off = None
+    misses = 0
+    locked = False
+    reacquisitions = 0
+
+    for rec in records:
+        cands = rec["candidates"]
+        best = cands[0] if cands else None
+        runner = cands[1] if len(cands) > 1 else None
+        margin = round((best["sim"] - runner["sim"]), 4) if (best and runner) else None
+        off = rec["offset"]
+
+        status = "lost"
+        reason = "no person detected" if not cands else None
+        chosen = None
+
+        if best is not None:
+            motion_ok = True
+            travelled = None
+            if last_box is not None and last_off is not None and off is not None:
+                dt = max(off - last_off, 1e-3)
+                ca, cb = _centre(last_box), _centre(best["bbox"])
+                travelled = math.hypot(cb[0] - ca[0], cb[1] - ca[1])
+                motion_ok = travelled <= max_step * (dt / max(stride_s, 1e-3))
+            # Ambiguity: two candidates too close to separate on identity alone.
+            # Rather than veto the frame outright (a flat veto cost ~half of all
+            # frames, since the measured median margin is only 0.065), let spatial
+            # continuity with the last CONFIRMED box settle which of the two is the
+            # target. This is the one place overlap is consulted, and it only ever
+            # chooses BETWEEN candidates that already cleared an identity bar - it
+            # can never conjure a target where identity says there is none.
+            tight = (margin is not None and margin < config.TRACK_TARGET_MIN_MARGIN)
+            tie_ok = False
+            if tight and last_box is not None:
+                tie_ok = _iou(last_box, best["bbox"]) >= config.TRACK_TARGET_TIE_IOU
+                if tie_ok and runner is not None:
+                    # if the runner-up overlaps the previous box MORE, the best
+                    # candidate is probably not the one we were following
+                    tie_ok = _iou(last_box, best["bbox"]) >= _iou(last_box, runner["bbox"])
+            tight = tight and not tie_ok
+
+            if not locked:
+                # first lock, or reclaiming after being lost: strict
+                need = (config.TRACK_TARGET_REACQUIRE_SIM if last_box is not None
+                        else config.TRACK_TARGET_CONFIRM_SIM)
+                if best["sim"] >= need and not tight:
+                    chosen, status = best, ("reacquired" if last_box is not None else "confirmed")
+                    if last_box is not None:
+                        reacquisitions += 1
+                else:
+                    reason = (f"below {'reacquire' if last_box is not None else 'confirm'} "
+                              f"threshold {need}" if best["sim"] < need
+                              else f"runner-up too close (margin {margin})")
+            elif best["sim"] >= config.TRACK_TARGET_CONFIRM_SIM and not tight:
+                chosen, status = best, "confirmed"
+            elif (best["sim"] >= config.TRACK_TARGET_CONTINUE_SIM and motion_ok and not tight):
+                chosen, status = best, "continued"
+            else:
+                if tight:
+                    reason = f"two candidates within {margin} - refusing to guess"
+                elif not motion_ok:
+                    reason = f"identity ok ({best['sim']}) but moved {travelled:.0f}px, implausible"
+                else:
+                    reason = f"identity too weak ({best['sim']})"
+
+        if chosen is not None:
+            points.append({"offset_seconds": off, "frame_number": rec["frame"],
+                           "bbox": [round(v, 2) for v in chosen["bbox"]],
+                           "confidence": chosen["det_conf"],
+                           "identity": chosen["sim"], "status": status,
+                           "predicted": False})
+            last_box, last_off = chosen["bbox"], off
+            locked = True
+            misses = 0
+        else:
+            misses += 1
+            if misses >= config.TRACK_TARGET_LOST_AFTER:
+                locked = False               # lock dropped; re-acquisition needed
+
+        if config.TRACK_TARGET_DEBUG:
+            debug.append({"frame": rec["frame"], "offset": off, "status": status,
+                          "target_detected": chosen is not None,
+                          "best_sim": best["sim"] if best else None,
+                          "runner_sim": runner["sim"] if runner else None,
+                          "margin": margin, "candidates": len(cands),
+                          "reason": reason})
+
+    return points, debug, reacquisitions
