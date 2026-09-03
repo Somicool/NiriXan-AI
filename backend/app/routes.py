@@ -90,6 +90,23 @@ def track_path_route(detection_id: int):
     return track_path.get_track_path(detection_id)
 
 
+@router.get("/track/{detection_id}/target")
+def track_target_route(detection_id: int, force: bool = False):
+    """Track Person: re-analyse the ORIGINAL video for this one selected identity.
+
+    Unlike /track/{id}/path - which replays the boxes stored at ingest time at
+    ~2 FPS - this re-detects people in the source recording at a much denser rate
+    and only emits a box where the candidate is verified as the selected person.
+    Runs on demand only, and the result is cached per (video, reference detection,
+    logic version). The existing /path route is unchanged.
+    """
+    from . import track_target
+    out = track_target.retrack(detection_id, force=force)
+    if out.get("error") and not out.get("points"):
+        raise HTTPException(status_code=422, detail=out)
+    return out
+
+
 @router.get("/audit")
 def audit_route(limit: int = 50):
     with database.get_conn() as conn:
