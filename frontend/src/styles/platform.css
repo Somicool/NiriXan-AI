@@ -1293,3 +1293,17 @@ body {
 @media (max-width: 980px) {
   .fe-three { grid-template-columns: 1fr; }
 }
+
+/* --- Track Person: target-lock status chip -----------------------------------
+   Deliberately small and low-contrast. The primary signal is the box staying on
+   the right person; the label only explains a box that has disappeared. */
+.tv-lock {
+  margin-left: 8px; font-size: 9.5px; font-weight: 700; letter-spacing: .07em;
+  padding: 2px 7px; border-radius: 999px; vertical-align: middle;
+  border: 1px solid var(--fp-border); color: var(--fp-text-dim);
+}
+.tv-lock.confirmed { border-color: var(--fp-success); color: var(--fp-success); }
+.tv-lock.continued { border-color: var(--fp-accent); color: var(--fp-accent); }
+.tv-lock.reacquired { border-color: var(--fp-accent); color: var(--fp-accent); }
+.tv-lock.lost { border-color: var(--fp-warn); color: var(--fp-warn); }
+.tv-lock.refining { border-color: var(--fp-border-2); opacity: .85; }
