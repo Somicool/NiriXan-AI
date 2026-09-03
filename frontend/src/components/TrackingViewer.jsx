@@ -140,7 +140,7 @@ export default function TrackingViewer({ detection, onClose, onAddEvidence, inEv
     const p1 = pts[idx + 1]
     if (!p1) return (t - p0.offset_seconds <= stride * 1.5) ? p0.bbox : null
     const gap = p1.offset_seconds - p0.offset_seconds
-    if (gap > stride * 2.5) {                          // object left the frame in this interval
+    if (gap > stride * 2.5) {                          // target temporarily lost here
       if (t - p0.offset_seconds <= stride * 1.5) return p0.bbox
       if (p1.offset_seconds - t <= stride * 1.5) return p1.bbox
       return null
@@ -160,13 +160,33 @@ export default function TrackingViewer({ detection, onClose, onAddEvidence, inEv
     if (!el) return
     const fw = path?.frame_width, fh = path?.frame_height
     const b = (showBoxRef.current && fw && fh) ? boxAt(t) : null
+    // Report the lock state of the nearest verified sample. When no box is drawn
+    // the target is temporarily lost - stated plainly rather than papered over by
+    // moving the last box onto whoever is nearby.
+    if (verifiedRef.current) {
+      const pts = path?.points || []
+      let near = null, bestDt = Infinity
+      for (const p of pts) {
+        const dt = Math.abs((p.offset_seconds ?? 0) - t)
+        if (dt < bestDt) { bestDt = dt; near = p }
+      }
+      // Only report a lock state INSIDE the verified span. Outside it the person is
+      // simply not on camera, and calling that "temporarily lost" was wrong - it
+      // implied the tracker had lost someone who was there.
+      const inSpan = pts.length
+        && t >= (pts[0].offset_seconds ?? 0) - stride * 1.5
+        && t <= (pts[pts.length - 1].offset_seconds ?? 0) + stride * 1.5
+      const st = !inSpan ? null
+        : (!b || bestDt > stride * 1.5) ? 'lost' : (near?.status || 'confirmed')
+      if (st !== statusRef.current) { statusRef.current = st; setStatus(st) }
+    }
     if (!b) { el.style.display = 'none'; return }
     el.style.display = 'block'
     el.style.left = `${(b[0] / fw) * 100}%`
     el.style.top = `${(b[1] / fh) * 100}%`
     el.style.width = `${(b[2] / fw) * 100}%`
     el.style.height = `${(b[3] / fh) * 100}%`
-  }, [boxAt, path])
+  }, [boxAt, path, stride])
 
   // ---- rAF loop keeps box + timeline in sync with playback ----
   useEffect(() => {
