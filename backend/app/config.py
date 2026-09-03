@@ -566,6 +566,105 @@ FACE_ENH_CODEFORMER_SIZE = 512               # the model's fixed input resolutio
 FACE_ENH_CODEFORMER_W = (1.0, 0.5)
 
 # ------------------------------------------------------------------
+# Track Person - QUERY-TIME target-specific re-tracking (app/track_target.py)
+# ------------------------------------------------------------------
+# Runs ONLY when the officer clicks Track Person. Ingestion is untouched: it still
+# owns detection, tracking, embeddings and search. This pass exists because the
+# stored track is not good enough to drive an overlay, for reasons that were
+# measured rather than assumed:
+#
+#   * detections are stored at ~2 FPS (median stride 0.50 s) while the clips play
+#     at 20 FPS, so 9 of every 10 rendered frames had NO real box and the viewer
+#     drew a straight-line interpolation between samples half a second apart. A
+#     walking person covers real ground in 0.5 s, so that line passes through
+#     whatever - and whoever - is in between.
+#   * the candidate pool was only the stored track_id. When the identity check
+#     correctly rejected a frame, there was no way to find the target's REAL box in
+#     that frame, so a hole appeared and got interpolated across.
+#   * one stored track_id is not always one person: track 89 on video 122 spans a
+#     132.5 s internal gap, track 100070 a 49.0 s gap - the id was reused.
+#
+# So Track Person now re-detects people in the source video at a much denser frame
+# rate and picks the box that matches the SELECTED identity, or draws nothing.
+TRACK_TARGET_ENABLED = True
+# Bump when the matching logic changes; cached results with an older version are
+# recomputed instead of served stale.
+TRACK_TARGET_VERSION = 3
+
+TRACK_TARGET_FPS = 5.0            # analysis rate (native 20 FPS -> every 4th frame).
+                                  # 10x denser than the ~0.5 s stored stride, which is
+                                  # what removes the long interpolations.
+TRACK_TARGET_MAX_FRAMES = 600     # hard ceiling per request (cost guard)
+TRACK_TARGET_BATCH = 16           # frames per YOLO call; one ReID call per batch too
+# Detection resolution for THIS pass only. Ingestion keeps YOLO_IMGSZ (960 on the
+# RTX 3050) because it must find small, distant objects it may never look at again.
+# Here the person's approximate size and location are already known from the indexed
+# result, so 640 finds the same people at roughly half the cost. Ingestion is
+# unaffected - this value is used nowhere else.
+TRACK_TARGET_IMGSZ = 640
+# --- candidate pruning by SIZE (the main speed lever) ---
+# Profiled: ReID was 61% of the runtime (14.2 s of 23.2 s) because it embedded every
+# person in every frame - 12 people per frame, 4,374 crops for one 72 s appearance.
+# YOLO was 28%, decoding only 10%.
+#
+# The target's on-screen height across the clicked appearance is already known from
+# the indexed detections. A candidate far outside that range is at a different
+# distance from the camera and cannot be this person, so it is skipped before the
+# embedding is ever computed. This gates on SIZE, not on position - proximity still
+# plays no part in deciding identity, so the "nearest box wins" failure cannot creep
+# back in. When the gate would reject everything, the largest few are embedded anyway
+# so a bad height estimate cannot blind the pass.
+TRACK_TARGET_H_TOL_LO = 0.70       # accept down to 70% of the smallest indexed height
+TRACK_TARGET_H_TOL_HI = 1.45       # ...and up to 145% of the largest
+TRACK_TARGET_MIN_CANDS = 4         # always score at least this many, largest first
+TRACK_TARGET_PAD_S = 4.0          # look this far either side of the indexed window
+# A stored track_id is not always ONE appearance: track 89 on video 122 spans a
+# 132.5 s internal gap because the id was reused. Taking the raw track span as the
+# analysis window made it 242 s long, which then hit TRACK_TARGET_MAX_FRAMES and
+# widened the stride back to 0.45 s - no denser than the stored data, defeating the
+# whole point. So the stored detections are first split into appearances at gaps
+# longer than this, and only the appearance the officer clicked is analysed.
+# Re-acquisition still recovers the target across shorter gaps inside it.
+TRACK_TARGET_SEGMENT_GAP_S = 10.0
+TRACK_TARGET_DET_CONF = 0.25      # person-detector floor; lower than ingest on purpose,
+                                  # since identity - not the detector - decides
+# --- identity thresholds ---
+# Calibrated from the genuine/impostor separation measured on this footage (see
+# scripts/benchmark_track_target.py). Continuation is deliberately easier than
+# re-acquisition: holding a confirmed target needs less evidence than claiming a
+# lost one back.
+# Measured over 2,527 analysed frames on five real tracks (see the calibration in
+# scripts/benchmark_track_target.py). Best-candidate ("genuine" proxy) similarity:
+# p05 0.648, median 0.739, p90 0.831. Runner-up ("impostor" proxy): median 0.661,
+# p90 0.704, p99 0.81. The two overlap - OSNet does not separate people crisply on
+# this footage - so the operating point is a deliberate choice, not a clean split:
+#   confirm  frames kept   impostors above
+#     0.65      94.7%           62.8%      <- far too permissive
+#     0.68      82.6%           27.1%
+#     0.72      58.9%            5.7%      <- chosen
+#     0.80      21.6%            1.5%      <- used for re-acquisition only
+TRACK_TARGET_CONFIRM_SIM = 0.72   # high confidence - lock or hold the target
+TRACK_TARGET_CONTINUE_SIM = 0.60  # medium - only with motion continuity supporting it
+TRACK_TARGET_REACQUIRE_SIM = 0.80 # strict: reclaiming a lost target
+# The best candidate should beat the runner-up by this much. Measured margin is
+# p10 0.008, MEDIAN 0.065 - so a flat 0.06 rejected roughly half of ALL frames,
+# which is what held coverage down to ~21% in the first run. It is now a tie-break
+# trigger rather than a veto: when the margin is this small the tie is resolved by
+# continuity with the last confirmed box, and only rejected if continuity fails too.
+TRACK_TARGET_MIN_MARGIN = 0.04
+# How much the best candidate must overlap the previous confirmed box to settle an
+# ambiguous margin. Overlap here is evidence about WHICH candidate, never about
+# whether a candidate exists - identity still has to clear CONTINUE_SIM.
+TRACK_TARGET_TIE_IOU = 0.30
+# Motion plausibility: a confirmed target may move at most this fraction of the
+# frame diagonal per second. Used only to SUPPORT identity, never to override it.
+TRACK_TARGET_MAX_SPEED_DIAG = 0.55
+TRACK_TARGET_LOST_AFTER = 3       # consecutive misses before the lock is dropped
+# Bridge at most this long a hole, and only if the person barely moved across it.
+TRACK_TARGET_BRIDGE_S = 0.5
+TRACK_TARGET_DEBUG = True         # keep per-frame decision records for auditing
+
+# ------------------------------------------------------------------
 # Processing modes: Fast (default, quick indexing/demos) vs Accurate
 # (full forensic pipeline). Every knob that differs between the two lives here,
 # so the single ingest_video() reads a preset instead of duplicating code.
