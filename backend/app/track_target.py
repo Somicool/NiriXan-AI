@@ -73,3 +73,102 @@ def _iou(a, b) -> float:
     if inter <= 0:
         return 0.0
     return float(inter / (a[2] * a[3] + b[2] * b[3] - inter + 1e-9))
+
+
+# ------------------------------------------------------------------- reference
+def build_reference(detection_id: int) -> dict:
+    """Multi-view identity for the SELECTED person.
+
+    Reuses track_path.reference_views, which already picks up to five sharp,
+    well-sized, visually varied views of the chosen track and anchors them on the
+    detection the investigator actually clicked. Those stored ReID embeddings are
+    the identity.
+
+    Clothing colour is deliberately NOT part of this. Auditing the colour data
+    found 69% of detections labelled grey/white/silver and 74% of tops equal to
+    their bottoms, so a colour term would inject noise, not evidence. ReID is the
+    primary signal; a face embedding is added as corroboration when the gallery
+    already holds one for this track.
+    """
+    refs = database.get_detections([detection_id])
+    if not refs:
+        return {}
+    ref = refs[0]
+    vid, tid = ref.get("video_id"), ref.get("track_id")
+    rows = database.get_track_detections(vid, tid) or [ref]
+
+    view_ids, _diag = track_path.reference_views(rows, detection_id)
+    vecs = []
+    for did in view_ids:
+        u = _unit(vector_store.get_vector("reid", did))
+        if u is not None and u.shape[0] == config.REID_DIM:
+            vecs.append(u)
+    if not vecs:                     # fall back to the whole track's usable vectors
+        for r in rows:
+            u = _unit(vector_store.get_vector("reid", r["detection_id"]))
+            if u is not None and u.shape[0] == config.REID_DIM:
+                vecs.append(u)
+            if len(vecs) >= config.REID_DIM:
+                break
+    if not vecs:
+        return {}
+
+    M = np.vstack(vecs).astype("float32")
+    centroid = _unit(M.mean(axis=0))
+    # a face embedding for this track, if Save Face already computed one
+    face = None
+    try:
+        with database.get_conn() as conn:
+            row = conn.execute(
+                "SELECT embedding FROM saved_faces WHERE detection_id IN "
+                "(SELECT detection_id FROM detections WHERE video_id=? AND track_id=?) "
+                "AND embedding IS NOT NULL LIMIT 1", (vid, tid)).fetchone()
+        if row:
+            import base64
+            face = _unit(np.frombuffer(base64.b64decode(row["embedding"]), dtype="float32"))
+    except Exception:
+        face = None
+
+    # Where to look. Split the stored detections into APPEARANCES at long gaps and
+    # keep only the one the officer clicked - a stored track_id can cover two
+    # separate appearances (or two people) minutes apart, and analysing that whole
+    # span forces the sampling stride back down to the stored density.
+    vindex = track_path._video_index()
+    stamped = []
+    for r in rows:
+        pb = track_path.playback_fields(r, vindex)
+        if pb.get("offset_seconds") is not None:
+            stamped.append((pb["offset_seconds"], r["detection_id"]))
+    stamped.sort()
+    seg_from = seg_to = None
+    segments = []
+    if stamped:
+        cur = [stamped[0]]
+        for prev, nxt in zip(stamped, stamped[1:]):
+            if nxt[0] - prev[0] > config.TRACK_TARGET_SEGMENT_GAP_S:
+                segments.append(cur); cur = [nxt]
+            else:
+                cur.append(nxt)
+        segments.append(cur)
+        chosen_seg = next((s for s in segments
+                           if any(d == detection_id for _o, d in s)), segments[0])
+        seg_from, seg_to = chosen_seg[0][0], chosen_seg[-1][0]
+
+    # On-screen height range of the target across the clicked appearance, used to
+    # skip candidates that are obviously at a different distance (see config).
+    seg_ids = {d for _o, d in (chosen_seg if stamped else [])}
+    heights = [r["bbox_h"] for r in rows
+               if r.get("bbox_h") and r["detection_id"] in seg_ids]
+    if not heights:
+        heights = [r["bbox_h"] for r in rows if r.get("bbox_h")]
+    h_lo = h_hi = None
+    if heights:
+        h_lo = min(heights) * config.TRACK_TARGET_H_TOL_LO
+        h_hi = max(heights) * config.TRACK_TARGET_H_TOL_HI
+
+    return {"views": M, "centroid": centroid, "view_ids": view_ids, "face": face,
+            "ref": ref, "video_id": vid, "track_id": tid,
+            "known_from": seg_from, "known_to": seg_to,
+            "h_lo": h_lo, "h_hi": h_hi,
+            "appearances": len(segments),
+            "track_span": [stamped[0][0], stamped[-1][0]] if stamped else None}
