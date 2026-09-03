@@ -261,7 +261,7 @@ export default function TrackingViewer({ detection, onClose, onAddEvidence, inEv
         <div className="tv-body">
           {/* ---- stage + overlay ---- */}
           <div className="tv-stagewrap">
-            {loading ? <div className="tv-msg">Loading tracking data…</div>
+            {loading ? <div className="tv-msg">Analysing video for the selected identity…</div>
               : error ? <div className="tv-msg err">{error}</div>
                 : !playable ? <div className="tv-msg">This recording isn’t playable in the browser.</div>
                   : (
@@ -294,7 +294,14 @@ export default function TrackingViewer({ detection, onClose, onAddEvidence, inEv
                           onChange={(e) => seekTo(parseFloat(e.target.value))} />
                         <span className="tv-t end" title="Track end">{fmt(end)}</span>
                       </div>
-                      <div className="tv-nowline"><span className="tv-now">{fmt(curTime)}</span> / {fmt(end)} <span className="tv-muted">· {path.points.length} tracked frames</span></div>
+                      <div className="tv-nowline"><span className="tv-now">{fmt(curTime)}</span> / {fmt(end)} <span className="tv-muted">· {path.points.length} verified boxes</span>
+                        {verified?.refining
+                          ? <span className="tv-lock refining">Verifying identity…</span>
+                          : status && <span className={'tv-lock ' + status}>{
+                            status === 'lost' ? 'Temporarily lost'
+                              : status === 'reacquired' ? 'Reacquired'
+                                : status === 'continued' ? 'Tracking' : 'Confirmed'}</span>}
+                      </div>
                     </>
                   )}
           </div>
