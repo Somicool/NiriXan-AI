@@ -521,7 +521,14 @@ def retrack(detection_id: int, force: bool = False) -> dict:
         cap.release()
         return {"error": "The original recording could not be opened.", "points": []}
     try:
-        records = _analyse_frames(cap, f_start, f_stop, step, reference, fw, fh, native)
+        # Priority hold on the shared GPU lock: this is a request the officer is
+        # waiting for, so it must not run concurrently with the speculative
+        # best-face scan (measured 12x slowdown when they overlap) and must not
+        # queue behind one either. Purely scheduling - the analysis below is
+        # unchanged, same frames and same decisions.
+        from . import gpu_lock
+        with gpu_lock.hold(priority=True):
+            records = _analyse_frames(cap, f_start, f_stop, step, reference, fw, fh, native)
     finally:
         cap.release()
 
