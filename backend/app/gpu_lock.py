@@ -73,3 +73,17 @@ def priority_active() -> bool:
     """True while a user-facing GPU pass is running."""
     with _counter_lock:
         return _priority_waiting > 0
+
+
+def yield_to_priority(poll: float = 0.05, max_wait: float = 180.0) -> None:
+    """Pause speculative background GPU work while a user request is running.
+
+    Called between frames of the best-face scan. It only ever WAITS - it does not
+    skip work or shorten the scan - so the scan's result cannot change.
+    `max_wait` is a safety valve so a stuck priority flag can never wedge the
+    background worker forever.
+    """
+    waited = 0.0
+    while priority_active() and waited < max_wait:
+        time.sleep(poll)
+        waited += poll
