@@ -76,7 +76,7 @@ def _iou(a, b) -> float:
 
 
 # ------------------------------------------------------------------- reference
-def build_reference(detection_id: int) -> dict:
+def build_reference(detection_id: int, ref: dict | None = None, vindex: dict | None = None) -> dict:
     """Multi-view identity for the SELECTED person.
 
     Reuses track_path.reference_views, which already picks up to five sharp,
@@ -89,11 +89,16 @@ def build_reference(detection_id: int) -> dict:
     their bottoms, so a colour term would inject noise, not evidence. ReID is the
     primary signal; a face embedding is added as corroboration when the gallery
     already holds one for this track.
+
+    `ref` and `vindex` let a caller that already has them (retrack()) pass them
+    in instead of this function re-fetching the exact same row and re-scanning
+    the exact same table - no behaviour change, one fewer query each of two kinds.
     """
-    refs = database.get_detections([detection_id])
-    if not refs:
-        return {}
-    ref = refs[0]
+    if ref is None:
+        refs = database.get_detections([detection_id])
+        if not refs:
+            return {}
+        ref = refs[0]
     vid, tid = ref.get("video_id"), ref.get("track_id")
     rows = database.get_track_detections(vid, tid) or [ref]
 
