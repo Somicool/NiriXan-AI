@@ -375,6 +375,12 @@ def rank_faces_in_track(video_id, track_id, max_frames=None) -> dict:
     best, ranked, frames_seen, faces_seen = None, [], 0, 0
     try:
         for d in cands:
+            # Step aside while the officer is waiting on a GPU pass of their own
+            # (Track Person). This only WAITS between frames - no frame is skipped
+            # and nothing about the scoring below changes, so the winning face is
+            # identical; it just may take longer to arrive. Measured: without this,
+            # an overlapping Track Person pass ran 12x slower.
+            gpu_lock.yield_to_priority()
             frame = reader.read(d.get("frame_number"))          # FULL-RES original frame
             if frame is None:
                 continue
