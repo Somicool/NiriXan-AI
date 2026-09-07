@@ -480,7 +480,11 @@ def retrack(detection_id: int, force: bool = False) -> dict:
         if c:
             return _out(c, True)
 
-    reference = build_reference(detection_id)
+    # video_index() rebuilds its dict from a full `videos` table read each call
+    # (cheap alone, ~0.6ms, but there is no reason to pay it twice). Loaded once
+    # here and handed to build_reference instead of it loading its own copy.
+    vindex = track_path._video_index()
+    reference = build_reference(detection_id, ref=ref, vindex=vindex)
     if not reference:
         return {"error": "No usable identity embedding for this person - cannot "
                          "verify the target, so no box is drawn.",
@@ -490,7 +494,6 @@ def retrack(detection_id: int, force: bool = False) -> dict:
     if vpath is None:
         return {"error": "The original recording is no longer on disk.", "points": []}
 
-    vindex = track_path._video_index()
     v = vindex.get(vid) or {}
     native = float(v.get("native_fps") or 25.0)
     fw, fh = v.get("width"), v.get("height")
