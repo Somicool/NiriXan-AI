@@ -835,6 +835,10 @@ _prep_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="face-prep")
 
 def _prep_worker(video_id, track_id, detection_id) -> None:
     try:
+        # This speculative scan yields to user-facing GPU work between frames (see
+        # gpu_lock and the check inside rank_faces_in_track). Measured: the two
+        # running together made the Track Person pass 12x slower (2.9s -> 34.6s).
+        # Same frames, same scoring, same winner - only the timing changes.
         best_face_for_detection(detection_id, deep=True)
     except Exception as exc:                     # never take the server down
         print(f"[face] prepare failed for video {video_id} track {track_id}: {exc}")
