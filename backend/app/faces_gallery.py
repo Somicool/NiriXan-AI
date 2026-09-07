@@ -17,7 +17,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from . import config, database
+from . import config, database, gpu_lock
 from .search import vector_store
 from .search.text_search import media_url, _camera_names, _video_index, playback_fields, to_result_item
 
