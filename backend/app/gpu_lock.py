@@ -47,3 +47,23 @@ from contextlib import contextmanager
 
 _counter_lock = threading.Lock()
 _priority_waiting = 0
+
+
+@contextmanager
+def hold(priority: bool = False):
+    """Mark a user-facing GPU pass as active for its duration.
+
+    Deliberately NOT an exclusive lock: blocking the officer behind speculative
+    background work is the problem this exists to avoid.
+    """
+    global _priority_waiting
+    if not priority:
+        yield
+        return
+    with _counter_lock:
+        _priority_waiting += 1
+    try:
+        yield
+    finally:
+        with _counter_lock:
+            _priority_waiting -= 1
