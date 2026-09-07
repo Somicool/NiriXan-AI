@@ -138,7 +138,8 @@ def build_reference(detection_id: int, ref: dict | None = None, vindex: dict | N
     # keep only the one the officer clicked - a stored track_id can cover two
     # separate appearances (or two people) minutes apart, and analysing that whole
     # span forces the sampling stride back down to the stored density.
-    vindex = track_path._video_index()
+    if vindex is None:
+        vindex = track_path._video_index()
     stamped = []
     for r in rows:
         pb = track_path.playback_fields(r, vindex)
