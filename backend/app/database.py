@@ -326,6 +326,13 @@ CREATE INDEX IF NOT EXISTS idx_case_ev ON case_evidence(case_key, position);
 CREATE INDEX IF NOT EXISTS idx_det_camera ON detections(camera_id);
 CREATE INDEX IF NOT EXISTS idx_det_time   ON detections(timestamp);
 CREATE INDEX IF NOT EXISTS idx_det_class  ON detections(class_label);
+-- get_track_detections() filters on (video_id, track_id) and is called on every
+-- Track Person request (at least twice: once to build the reference identity,
+-- once to load the indexed track for immediate playback). Without this index it
+-- was a full table scan of the detections table (21,821 rows) plus a temp B-tree
+-- sort - measured at ~47ms per call. Purely additive; changes no query results,
+-- only how SQLite finds the rows.
+CREATE INDEX IF NOT EXISTS idx_det_video_track ON detections(video_id, track_id, frame_number);
 CREATE INDEX IF NOT EXISTS idx_plate_text ON plates(plate_text);
 """
 
