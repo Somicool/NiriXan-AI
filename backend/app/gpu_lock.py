@@ -67,3 +67,9 @@ def hold(priority: bool = False):
     finally:
         with _counter_lock:
             _priority_waiting -= 1
+
+
+def priority_active() -> bool:
+    """True while a user-facing GPU pass is running."""
+    with _counter_lock:
+        return _priority_waiting > 0
