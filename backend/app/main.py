@@ -6,6 +6,7 @@ Run from the backend/ directory:
 Interactive API docs at http://localhost:8000/docs
 """
 import asyncio
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -25,11 +26,36 @@ from .routes_case import router as case_router
 
 
 
+def _warm_search_models() -> None:
+    """Load the SEARCH models once, in the background, at boot.
+
+    They were already loaded only once per process (module-level singletons, never
+    reloaded per request) - but lazily, so the very FIRST search of a session paid
+    the cost: measured 4.60 s for CLIP, after which every call was 0 ms. Doing it
+    at startup moves that wait off the officer's first query.
+
+    Only CLIP and the FAISS indexes are warmed - together a small, predictable
+    footprint. YOLO / OSNet / InsightFace are deliberately NOT preloaded: on a 6 GB
+    card holding all of them resident risks an out-of-memory failure during a real
+    pass, which would be a worse problem than a slow first click.
+    """
+    try:
+        from .ingestion import embedder
+        from .search import vector_store
+        embedder.get_clip()
+        for name in ("clip", "reid", "face"):
+            vector_store.get_index(name)
+        print("[startup] search models + FAISS indexes warm")
+    except Exception as exc:                      # never block the server from starting
+        print(f"[startup] model warm-up skipped: {exc}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     database.init_db()
-    # (model loading will be wired in once the pipeline/search modules exist)
+    # Background thread so the port opens immediately and health checks don't wait.
+    threading.Thread(target=_warm_search_models, name="warmup", daemon=True).start()
     yield
     # Shutdown (nothing to clean up yet)
 
