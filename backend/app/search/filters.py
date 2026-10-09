@@ -6,7 +6,7 @@ match the requested camera / time window / object type / colour / vehicle type
 """
 from __future__ import annotations
 
-from .. import config
+from .. import config, database
 from ..models.schemas import SearchFilters
 
 _VEHICLE_LABELS = {config.DETECT_CLASSES[c] for c in config.VEHICLE_CLASSES}
@@ -21,7 +21,28 @@ def _object_type_labels(object_type):
     return None
 
 
-def match(det: dict, f: SearchFilters) -> bool:
+def _colour_ok(det: dict, wanted: set, colorless_ids: set) -> bool:
+    """Explicit colour-filter test for one detection.
+
+    Normal (colour) footage: unchanged - any wanted colour must be present.
+
+    Night-vision / B&W footage (video flagged colorless): only black and white
+    are measurable there, so a hue such as "blue" is UNRELIABLE, not absent.
+    Rejecting on it would silently zero out every result from that camera, so a
+    hue-only request skips the colour constraint for that video. Black / white
+    selections still filter normally."""
+    attrs = det.get("attributes") or {}
+    present = {attrs.get("color"), attrs.get("upper_color"), attrs.get("lower_color")}
+    present = {c.lower() for c in present if c}
+    if det.get("video_id") in colorless_ids:
+        bw = wanted & set(config.BW_COLORS)
+        if not bw:
+            return True                   # hue on B&W footage: unreliable, don't filter
+        return bool(bw & present)
+    return bool(wanted & present)
+
+
+def match(det: dict, f: SearchFilters, colorless_ids: set | None = None) -> bool:
     if f.cameras and det.get("camera_id") not in f.cameras:
         return False
 
@@ -45,9 +66,7 @@ def match(det: dict, f: SearchFilters) -> bool:
 
     if f.colors:
         wanted = {c.lower() for c in f.colors}
-        present = {attrs.get("color"), attrs.get("upper_color"), attrs.get("lower_color")}
-        present = {c.lower() for c in present if c}
-        if not (wanted & present):
+        if not _colour_ok(det, wanted, colorless_ids or set()):
             return False
 
     if f.vehicle_type and attrs.get("vehicle_type") != f.vehicle_type:
@@ -59,4 +78,6 @@ def match(det: dict, f: SearchFilters) -> bool:
 def apply_filters(detections: list[dict], f: SearchFilters | None) -> list[dict]:
     if f is None:
         return detections
-    return [d for d in detections if match(d, f)]
+    # one small query, and only when a colour filter is actually in use
+    colorless_ids = database.colorless_video_ids() if f.colors else set()
+    return [d for d in detections if match(d, f, colorless_ids)]
