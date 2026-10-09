@@ -1,7 +1,7 @@
 // Face Gallery - saved best faces + find the same individual across footage.
 // Reuses the existing InsightFace face index (no re-detection). Saved faces are
 // permanent (server-side) and only removed on explicit delete.
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { listSavedFaces, deleteSavedFace, findSimilarFaces, enhanceFace, getEnhancedFace } from '../api'
 import VideoPlayer from '../components/VideoPlayer'
 import TrackingViewer from '../components/TrackingViewer'
@@ -219,6 +219,19 @@ function EnhancePanel({ face }) {
 
   const original = face.preview_crop_url || face.face_crop_url || face.person_crop_url
 
+  // `aliveRef` guards BOTH effects below. Enhancement takes real time (measured
+  // 30-90s with CodeFormer + a full track re-scan on this hardware), so it is
+  // entirely normal for an officer to close the viewer or open a different face
+  // before it resolves. Without this guard the fetch still completes and calls
+  // setEnh/setBusy on an UNMOUNTED component - React silently drops those updates,
+  // so the panel is left showing busy=false/enh=null/refusal=null, i.e. back to
+  // the idle "Enhance Face" intro text even though the backend finished (and
+  // cached) a result. Reopening the SAME face then re-fetches it via
+  // getEnhancedFace below, so nothing is lost - it just looked like nothing had
+  // happened.
+  const aliveRef = useRef(true)
+  useEffect(() => { aliveRef.current = true; return () => { aliveRef.current = false } }, [face.saved_id])
+
   // Opening the tab only LOOKS for an existing result. Nothing is processed until
   // the officer asks for it (on-demand requirement).
   useEffect(() => {
@@ -233,6 +246,7 @@ function EnhancePanel({ face }) {
   async function run(force) {
     setBusy(true); setRefusal(null)
     const r = await enhanceFace(face.saved_id, force)
+    if (!aliveRef.current) return             // panel closed/changed while this was in flight
     if (r.ok) { setEnh(r.data); setOpenFrames(false) } else { setRefusal(r.detail); setEnh(null) }
     setBusy(false)
   }
@@ -272,7 +286,9 @@ function EnhancePanel({ face }) {
           Re-reading the original recording, collecting every face on this person's track,
           re-sampling between the indexed frames at native rate, verifying each appearance
           against the saved identity and testing whether any enhancement actually helps.
-          This takes a few seconds and is never run during ingestion.
+          This usually takes <b>30–90 seconds</b> on this hardware — it is never run during
+          ingestion, only on demand. You can leave this tab; the result is cached, so
+          reopening this face will show it once it's ready.
         </div>
       )}
 
