@@ -73,6 +73,7 @@ def library_route():
                 "video_id": v.get("video_id") if v else None,
                 "camera_id": v.get("camera_id") if v else None,
                 "duration": v.get("duration") if v else None,
+                "colorless": bool(v.get("colorless")) if v else False,
                 "url": f"/media/videos/{p.name}",
                 "size_mb": round(p.stat().st_size / 1048576, 1),
             })
