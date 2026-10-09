@@ -86,7 +86,9 @@ export default function Workspace() {
   const [showExport, setShowExport] = useState(false)
   const [trackView, setTrackView] = useState(null)     // detection being replayed in the tracking viewer
   const [regPlate, setRegPlate] = useState(null)       // plate whose Vehicle Registry is open
-  const [toast, setToast] = useState(null)             // transient status toast
+  const [toast, setToast] = useState(null)             // transient status toast {msg, kind}
+  const toastTimer = useRef(null)
+  const [savingFaces, setSavingFaces] = useState([])   // detection ids with a save in flight
   const [journeyFor, setJourneyFor] = useState(null)   // person awaiting journey scope choice
   const [pendingFile, setPendingFile] = useState(null) // upload awaiting camera assignment
   const navigate = useNavigate()
@@ -216,7 +218,14 @@ export default function Workspace() {
     logActivity(activityFromResult(r, 'found'))         // dashboard history: found
   }
   function trackObject(r) { logActivity(activityFromResult(r, 'tracked')); setTrackView(r) }
-  function showToast(msg) { setToast(msg); setTimeout(() => setToast(null), 3200) }
+  // One timer for the toast. Previously every call started its own 3.2s timer, so
+  // an older timer could wipe a NEWER toast - e.g. the "Face saved" message could
+  // vanish instantly. `sticky` keeps a progress message up until it is replaced.
+  function showToast(msg, { sticky = false, kind = 'info', ms = 4500 } = {}) {
+    clearTimeout(toastTimer.current)
+    setToast({ msg, kind })
+    if (!sticky) toastTimer.current = setTimeout(() => setToast(null), ms)
+  }
   async function runJourney(item, cams) {
     setJourneyFor(null); showToast('Reconstructing journey…')
     try {
@@ -229,13 +238,21 @@ export default function Workspace() {
     }
   }
   async function saveFaceFor(r) {
+    const id = r.detection_id
+    if (savingFaces.includes(id)) return                     // already saving this one
+    setSavingFaces((s) => [...s, id])
+    // Immediate feedback - a first save scans the whole track (~30-50 s).
+    showToast('Saving face… scanning this person\'s track for the clearest face.',
+              { sticky: true })
     try {
       const inv = caseInfo?.title || caseInfo?.caseNumber || 'Investigation'
-      const rec = await saveFace({ detectionId: r.detection_id, investigation: inv })
-      showToast(`Face saved to Face Gallery (#${rec.saved_id}).`)
+      const rec = await saveFace({ detectionId: id, investigation: inv })
+      showToast(`✓ Face saved to Face Gallery (#${rec.saved_id}).`, { kind: 'ok' })
     } catch (e) {
       showToast(e?.response?.status === 404 ? 'No usable face found in this track.'
-        : (e?.response?.data?.detail || e.message || 'Could not save face.'))
+        : (e?.response?.data?.detail || e.message || 'Could not save face.'), { kind: 'err' })
+    } finally {
+      setSavingFaces((s) => s.filter((x) => x !== id))
     }
   }
   // Follow playback in the TIMELINE STRIP only, never by scrolling the page.
@@ -409,6 +426,7 @@ export default function Workspace() {
                         <div className="ws-fc-body">
                           <div className="ws-fc-name" title={v.filename}>{v.filename}</div>
                           <div className="ws-fc-sub">{analysed ? (camLabel(v.camera_id) + (v.duration ? '  ·  ' + fmtDur(v.duration) : '')) : (v.size_mb != null ? v.size_mb + ' MB · not analysed' : 'not analysed')}</div>
+                          {v.colorless && <span className="ws-bw" title="Only black/white colour analysis is reliable for this footage.">Night Vision / B&amp;W</span>}
                         </div>
                       </div>
                     )
@@ -513,7 +531,7 @@ export default function Workspace() {
                     <button className={'ws-rc-add ' + (inEvidence(r.detection_id) ? 'on' : '')} onClick={() => toggleEvidence(r)} title={inEvidence(r.detection_id) ? 'In evidence' : 'Add to evidence'}>{inEvidence(r.detection_id) ? '✓' : '＋'}</button>
                     <div className="ws-rc-foot">
                       {r.track_id != null && <button className="ws-rc-act track" onClick={() => trackObject(r)} title="Follow this object in the video">⤳ Track</button>}
-                      {r.class_label === 'person' && <button className="ws-rc-act face" onClick={() => saveFaceFor(r)} title="Save the clearest face to the Face Gallery">☺ Save Face</button>}
+                      {r.class_label === 'person' && <button className="ws-rc-act face" onClick={() => saveFaceFor(r)} disabled={savingFaces.includes(r.detection_id)} title="Save the clearest face to the Face Gallery">{savingFaces.includes(r.detection_id) ? '⏳ Saving…' : '☺ Save Face'}</button>}
                       {r.class_label === 'person' && <button className="ws-rc-act jn" onClick={() => setJourneyFor(r)} title="Reconstruct movement across cameras">⇢ Journey</button>}
                       {r.attributes?.plate_text && <button className="ws-rc-act info" onClick={() => setRegPlate(r.attributes.plate_text)} title="Demo vehicle registry lookup">ⓘ Vehicle Info</button>}
                     </div>
@@ -582,7 +600,7 @@ export default function Workspace() {
       {reprocess && <ReprocessDialog clip={reprocess} onClose={() => setReprocess(null)}
         onGo={(opts) => runReprocess(reprocess, opts)} />}
 
-      {toast && <div className="ws-toast">{toast}</div>}
+      {toast && <div className={'ws-toast ' + (toast.kind || '')} role="status" aria-live="polite">{toast.msg}</div>}
     </div>
   )
 }
