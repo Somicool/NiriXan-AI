@@ -35,7 +35,7 @@ def _warm_search_models() -> None:
     at startup moves that wait off the officer's first query.
 
     Only CLIP and the FAISS indexes are warmed - together a small, predictable
-    footprint. YOLO / OSNet / InsightFace are deliberately NOT preloaded: on a 6 GB
+    footprint. YOLO / OSNet are deliberately NOT preloaded (InsightFace is, below): on a 6 GB
     card holding all of them resident risks an out-of-memory failure during a real
     pass, which would be a worse problem than a slow first click.
     """
@@ -48,6 +48,18 @@ def _warm_search_models() -> None:
         print("[startup] search models + FAISS indexes warm")
     except Exception as exc:                      # never block the server from starting
         print(f"[startup] model warm-up skipped: {exc}")
+    # InsightFace too: measured 30.5 s to load on first use, which landed on the
+    # officer's first Save Face / face preview after every restart. It does not
+    # raise peak VRAM - ingestion and every face feature load the same singleton
+    # and keep it resident for the life of the process anyway.
+    try:
+        from . import config as _cfg
+        if getattr(_cfg, "FACE_RECOGNITION_ENABLED", True):
+            from .ingestion import face_recognizer
+            face_recognizer.get_face_app()
+            print("[startup] face model warm")
+    except Exception as exc:
+        print(f"[startup] face model warm-up skipped: {exc}")
 
 
 @asynccontextmanager
