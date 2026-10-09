@@ -357,7 +357,9 @@ def _migrate(conn) -> None:
     """Add columns introduced after a DB was first created (safe, idempotent)."""
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(videos)").fetchall()}
     for col, decl in (("duration", "REAL"), ("end_time", "TEXT"),
-                      ("native_fps", "REAL"), ("width", "INTEGER"), ("height", "INTEGER")):
+                      ("native_fps", "REAL"), ("width", "INTEGER"), ("height", "INTEGER"),
+                      # night-vision / B&W footage: colour reported as black/white only
+                      ("colorless", "INTEGER DEFAULT 0")):
         if col not in cols:
             conn.execute(f"ALTER TABLE videos ADD COLUMN {col} {decl}")
     # ANPR: supporting-frame count, reading engine, and the best PLATE crop path.
@@ -464,8 +466,22 @@ def list_videos() -> list[dict]:
     with get_conn() as conn:
         return [dict(r) for r in conn.execute(
             "SELECT video_id, camera_id, filename, fps, start_time, duration, end_time, "
-            " native_fps, width, height, status FROM videos ORDER BY camera_id, start_time"
+            " native_fps, width, height, status, colorless FROM videos "
+            "ORDER BY camera_id, start_time"
         ).fetchall()]
+
+
+def set_video_colorless(video_id: int, colorless: bool) -> None:
+    with get_conn() as conn:
+        conn.execute("UPDATE videos SET colorless=? WHERE video_id=?",
+                     (1 if colorless else 0, video_id))
+
+
+def colorless_video_ids() -> set[int]:
+    """Videos detected as night-vision / B&W (colour = black/white/unknown only)."""
+    with get_conn() as conn:
+        return {r["video_id"] for r in conn.execute(
+            "SELECT video_id FROM videos WHERE colorless=1").fetchall()}
 
 
 def video_index() -> dict:
