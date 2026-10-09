@@ -139,6 +139,95 @@ def _hsv_dominant(bgr):
     return _hue_to_color(dom, float(V[m].mean())), round(mfrac * band, 3)
 
 
+# ------------------------------------------------- night-vision / B&W footage
+def probe_colorless(video_path, n: int | None = None) -> tuple[bool, float]:
+    """(colorless, median mean-saturation) for a video, from a handful of frames.
+
+    Grayscale / IR night-vision footage carries no usable hue, so the normal
+    CLIP+HSV colour reading would label every garment grey/white/black at random
+    or, worse, guess a colour (CLIP called one grayscale crop "white" at p=0.50).
+    This lets ingestion switch such videos into black/white-only mode.
+
+    Lightweight on purpose: config.COLORLESS_PROBE_FRAMES frames spread evenly
+    across the clip, downscaled. Saturation is measured only on pixels with
+    V >= COLORLESS_MIN_V, because in near-black pixels S = (max-min)/max is
+    dominated by compression noise and would make a dark grayscale clip look
+    colourful."""
+    n = n or config.COLORLESS_PROBE_FRAMES
+    cap = cv2.VideoCapture(str(video_path))
+    try:
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        if total <= 0:
+            return False, -1.0
+        sats = []
+        for fi in np.linspace(0, total - 1, num=min(n, total), dtype=int):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(fi))
+            ok, frame = cap.read()
+            if not ok or frame is None or not frame.size:
+                continue
+            small = cv2.resize(frame, (320, 180), interpolation=cv2.INTER_AREA)
+            hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+            s, v = hsv[..., 1], hsv[..., 2]
+            lit = v >= config.COLORLESS_MIN_V
+            if lit.sum() < 100:          # almost entirely black frame: no evidence
+                continue
+            sats.append(float(s[lit].mean()))
+    finally:
+        cap.release()
+    if not sats:
+        return False, -1.0                # undecidable -> keep the normal pipeline
+    med = float(np.median(sats))
+    return med < config.COLORLESS_MAX_SAT, round(med, 2)
+
+
+def bw_color(region_bgr, whole_bgr=None):
+    """Black / white reading of a garment region from LUMINANCE only.
+
+    Returns ("black"|"white", confidence) or (None, 0.0) when it cannot say.
+    Hue is ignored entirely - grayscale/IR footage has none worth trusting.
+
+    Deliberately NOT run through prep_region(): its illumination normalisation
+    rescales brightness, which is exactly the signal being measured here. Only the
+    existing centre-sampling (_center) is reused, to keep background pixels at
+    the crop edges out of the reading.
+
+    Refuses (None) rather than guessing when:
+      * the region is too small to read
+      * the whole person crop is in deep shadow (black clothing and an unlit
+        scene look identical in grayscale)
+      * the region is mostly blown out (IR glare, not necessarily white cloth)
+      * neither dark nor bright pixels clearly dominate (mid-grey / mixed)"""
+    if region_bgr is None or not getattr(region_bgr, "size", 0):
+        return None, 0.0
+    h, w = region_bgr.shape[:2]
+    if h < config.BW_MIN_SIDE or w < config.BW_MIN_SIDE // 2:
+        return None, 0.0
+    if whole_bgr is not None and getattr(whole_bgr, "size", 0):
+        g_all = cv2.cvtColor(whole_bgr, cv2.COLOR_BGR2GRAY)
+        if float(g_all.mean()) < config.BW_SHADOW_MEAN:
+            return None, 0.0              # heavily shadowed scene
+    g = cv2.cvtColor(_center(region_bgr), cv2.COLOR_BGR2GRAY)
+    if g.size == 0:
+        return None, 0.0
+    if float((g >= 250).mean()) > config.BW_CLIPPED_MAX:
+        return None, 0.0                  # overexposed / IR glare
+    dark = float((g < config.BW_DARK_V).mean())
+    bright = float((g > config.BW_BRIGHT_V).mean())
+    if dark >= config.BW_MIN_SHARE and dark >= config.BW_DOMINANCE * bright:
+        return "black", round(dark, 3)
+    if bright >= config.BW_MIN_SHARE and bright >= config.BW_DOMINANCE * dark:
+        return "white", round(bright, 3)
+    return None, 0.0                      # ambiguous
+
+
+def bw_person_colors(img):
+    """(upper, upper_conf, lower, lower_conf) using the existing 40/60 split."""
+    cut = max(1, int(round(0.40 * img.shape[0])))
+    uc, ucs = bw_color(img[:cut, :], img)
+    lc, lcs = bw_color(img[cut:, :], img)
+    return uc, ucs, lc, lcs
+
+
 def fuse_clip_hsv(clip_color, clip_p, region_bgr):
     """Confidence-weighted fusion of the CLIP zero-shot colour and the HSV
     dominant colour. Replaces the old unconditional 'trust HSV': HSV now only
@@ -210,7 +299,29 @@ def extract_from_embedding(img_emb, class_id: int, crop_path: str | None = None,
     return _extract(img_emb, class_id, img)
 
 
-def extract_batch(crops, class_ids, whole_embs, region_split: bool = True) -> list[dict]:
+def extract_batch(crops, class_ids, whole_embs, region_split: bool = True,
+                  colorless: bool = False) -> list[dict]:
+    """See _extract_batch. `colorless=True` (night-vision / B&W video) replaces
+    ONLY the colour fields with a black/white/None luminance reading; accessories
+    and vehicle type are untouched. With colorless=False this is exactly the
+    original behaviour."""
+    if not colorless:
+        return _extract_batch(crops, class_ids, whole_embs, region_split=region_split)
+    # Skip the CLIP region-colour pass - its result would be discarded anyway.
+    results = _extract_batch(crops, class_ids, whole_embs, region_split=False)
+    for i, (img, cid) in enumerate(zip(crops, class_ids)):
+        ok = img is not None and getattr(img, "size", 0)
+        if cid in config.VEHICLE_CLASSES:
+            c, cs = bw_color(img, img) if ok else (None, 0.0)
+            results[i].update(color=c, color_score=cs, color_mode="bw")
+        elif cid in config.PERSON_CLASSES:
+            uc, ucs, lc, lcs = bw_person_colors(img) if ok else (None, 0.0, None, 0.0)
+            results[i].update(upper_color=uc, upper_color_score=ucs,
+                              lower_color=lc, lower_color_score=lcs, color_mode="bw")
+    return results
+
+
+def _extract_batch(crops, class_ids, whole_embs, region_split: bool = True) -> list[dict]:
     """Vectorised attribute extraction for a whole video's detections.
 
     Reuses the precomputed whole-crop CLIP embeddings (`whole_embs`) for vehicle
