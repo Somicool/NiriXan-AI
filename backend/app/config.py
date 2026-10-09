@@ -728,6 +728,27 @@ COLORS = ["red", "blue", "white", "black", "silver", "grey",
 # CLIP zero-shot colour. 1.0 = balanced (HSV wins only when its pixel support
 # beats CLIP's probability) instead of the old unconditional HSV priority.
 HSV_COLOR_WEIGHT = 1.0
+# --- Night-vision / black-and-white footage (attribute_extractor.probe_colorless) ---
+# A video whose median saturation (over lit pixels of a few sampled frames) is
+# below COLORLESS_MAX_SAT is treated as colourless: clothing/vehicle colour is then
+# reported ONLY as black / white / unknown, never a hue. Normal colour videos are
+# unaffected.
+COLORLESS_PROBE_FRAMES = 12      # frames sampled per video for the check
+COLORLESS_MIN_V = 40             # ignore near-black pixels (their S is noise)
+# Measured on this project's footage: real colour CCTV 20.3-59.6 (lowest is the
+# washed-out railway-station camera), grayscale re-encodes 5.5-8.6, and the real
+# B&W clip "test 12.mp4" 0.0. 14 sits midway between 8.6 and 20.3.
+COLORLESS_MAX_SAT = 14.0         # 0-255 scale
+# Black/white luminance classification (attribute_extractor.bw_color)
+BW_MIN_SIDE = 16                 # region shorter than this (px) -> unknown
+BW_DARK_V = 70                   # gray level below which a pixel counts as dark
+BW_BRIGHT_V = 170                # gray level above which a pixel counts as bright
+BW_MIN_SHARE = 0.55              # dark (or bright) must cover this much of the region
+BW_DOMINANCE = 2.0               # ...and be this many times the opposite share
+BW_SHADOW_MEAN = 30              # whole crop darker than this -> scene too dark to judge
+BW_CLIPPED_MAX = 0.50            # region more than this blown out -> glare, unknown
+BW_COLORS = ("black", "white")
+
 VEHICLE_TYPES = ["sedan", "hatchback", "SUV", "pickup truck", "van",
                  "auto-rickshaw", "bus", "truck", "motorcycle", "bicycle",
                  "tractor", "tempo", "mini truck", "scooter", "pickup"]
