@@ -164,6 +164,17 @@ def ingest_video(video_path, camera_id=None, start_time=None, fps=None,
     ingest_progress.set_meta(indexed=0, searchable=False, video_id=video_id)
     _emit("start", 2, f"registered video (mode={mode}, fps={target_fps}, imgsz={imgsz})")
 
+    # Night-vision / B&W check (a dozen downscaled frames). Only changes how
+    # colour attributes are read; detection, tracking, embeddings are unaffected.
+    try:
+        colorless, med_sat = attribute_extractor.probe_colorless(video_path)
+    except Exception:
+        colorless, med_sat = False, -1.0
+    database.set_video_colorless(video_id, colorless)
+    if colorless:
+        print(f"[ingest] {video_path.name}: low-colour footage (median saturation "
+              f"{med_sat}) - clothing colour limited to black/white")
+
     # ------------------------------------------------------------------
     # PROGRESSIVE / CHUNKED INGEST
     # ------------------------------------------------------------------
@@ -212,7 +223,7 @@ def ingest_video(video_path, camera_id=None, start_time=None, fps=None,
             clip_embs = embedder.embed_crops([d.crop_img for d in cdets], batch_size=clip_batch)
             attrs_list = attribute_extractor.extract_batch(
                 [d.crop_img for d in cdets], [d.class_id for d in cdets], clip_embs,
-                region_split=region_split)
+                region_split=region_split, colorless=colorless)
             t_embed += time.time() - t
 
             # OSNet re-ID for the person crops in this chunk.
