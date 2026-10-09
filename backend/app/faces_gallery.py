@@ -380,7 +380,10 @@ def rank_faces_in_track(video_id, track_id, max_frames=None) -> dict:
             # and nothing about the scoring below changes, so the winning face is
             # identical; it just may take longer to arrive. Measured: without this,
             # an overlapping Track Person pass ran 12x slower.
-            gpu_lock.yield_to_priority()
+            # Only the speculative background scan steps aside; a scan the officer
+            # is waiting on (Save Face) must not pause behind anything.
+            if getattr(_speculative, "on", False):
+                gpu_lock.yield_to_priority()
             frame = reader.read(d.get("frame_number"))          # FULL-RES original frame
             if frame is None:
                 continue
@@ -830,22 +833,59 @@ _prep_inflight: set[tuple] = set()
 # face caches nothing (by design - a poor face is never stored), so without this
 # every reopen would pay for the same fruitless 19 s scan again.
 _prep_done: set[tuple] = set()
+# Tracks whose full scan COMPLETED and found no face clearing the forensic bar.
+# Separate from _prep_done because a scan that crashed proved nothing - only a
+# finished scan may be reused as a "no face" answer. Valid for this process,
+# whose face settings cannot change while it runs.
+_prep_noface: set[tuple] = set()
 _prep_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="face-prep")
+# Marks the background worker's scan as speculative, so only IT yields to
+# user-facing GPU work (see rank_faces_in_track).
+_speculative = threading.local()
+# One lock per track: at most one scan of a given track at a time, whichever path
+# (background prepare or Save Face) gets there first. The other then reuses the
+# cached decision. Previously Save Face waited for a QUEUED prepare (behind every
+# other person the officer had opened - measured 47 s), and a prepare clicked
+# during a save scanned the same track a second time.
+_key_locks: dict[tuple, threading.Lock] = {}
+
+
+def _key_lock(key) -> threading.Lock:
+    with _prep_lock:
+        lk = _key_locks.get(key)
+        if lk is None:
+            lk = _key_locks[key] = threading.Lock()
+        return lk
 
 
 def _prep_worker(video_id, track_id, detection_id) -> None:
+    key = (video_id, track_id)
     try:
-        # This speculative scan yields to user-facing GPU work between frames (see
-        # gpu_lock and the check inside rank_faces_in_track). Measured: the two
-        # running together made the Track Person pass 12x slower (2.9s -> 34.6s).
-        # Same frames, same scoring, same winner - only the timing changes.
-        best_face_for_detection(detection_id, deep=True)
+        with _key_lock(key):
+            with _prep_lock:
+                known_noface = key in _prep_noface
+            cached = _cache_get(video_id, track_id)
+            if known_noface or (cached and cached.get("face_crop")):
+                return                           # Save Face already did this scan
+            # This speculative scan yields to user-facing GPU work between frames
+            # (see gpu_lock and the check inside rank_faces_in_track). Measured:
+            # the two running together made the Track Person pass 12x slower.
+            # Same frames, same scoring, same winner - only the timing changes.
+            _speculative.on = True
+            try:
+                best_face_for_detection(detection_id, deep=True)
+            finally:
+                _speculative.on = False
+            cached = _cache_get(video_id, track_id)
+            if not (cached and cached.get("face_crop")):
+                with _prep_lock:
+                    _prep_noface.add(key)
     except Exception as exc:                     # never take the server down
         print(f"[face] prepare failed for video {video_id} track {track_id}: {exc}")
     finally:
         with _prep_lock:
-            _prep_inflight.discard((video_id, track_id))
-            _prep_done.add((video_id, track_id))
+            _prep_inflight.discard(key)
+            _prep_done.add(key)
 
 
 def prepare_best_face(detection_id: int) -> dict:
@@ -903,8 +943,34 @@ def save_face(detection_id: int, investigation: str | None = None) -> dict | Non
     if reused is not None:
         return reused
 
-    # Rank EVERY face in the track and take the best representative one.
-    scan = rank_faces_in_track(vid, tid)
+    # Blocks only while a scan of THIS track is actually running (then reuses its
+    # decision). A prepare that is merely queued behind other people no longer
+    # makes the officer wait - this request scans now and the queued job then
+    # finds the cached answer.
+    key = (vid, tid)
+    with _key_lock(key):
+        reused = _save_from_cache(vid, tid, investigation)
+        if reused is not None:
+            return reused
+        return _save_face_scan(vid, tid, key, investigation)
+
+
+def _save_face_scan(vid, tid, key, investigation) -> dict:
+    import json
+    # This track was already fully scanned in this process and nothing cleared the
+    # forensic bar. Same scan, same settings -> same answer; don't pay ~35 s again.
+    with _prep_lock:
+        known_noface = key in _prep_noface
+    if known_noface:
+        return {"error": "No usable face found in this track.",
+                "reason": "the whole track was already scanned and no face cleared "
+                          "the forensic quality bar"}
+
+    # Rank EVERY face in the track and take the best representative one. Holding
+    # priority pauses background prepare scans of OTHER people between frames, so
+    # they don't share the GPU with the scan the officer is waiting on.
+    with gpu_lock.hold(priority=True):
+        scan = rank_faces_in_track(vid, tid)
     found = scan["best"]
 
     if found is not None:
@@ -946,6 +1012,9 @@ def save_face(detection_id: int, investigation: str | None = None) -> dict | Non
 
     # Forensic rule: never save a poor crop. If no face in the whole track clears
     # the acceptance bar, report it instead of storing a low-quality image.
+    if scan.get("frames_seen"):                  # a real, completed scan - remember it
+        with _prep_lock:
+            _prep_noface.add(key)
     if config.FACE_DIAG_LOG:
         print(f"[face] track {tid} (video {vid}) -> REJECTED: {scan.get('reason')} "
               f"(scanned {scan.get('frames_seen')} full-res frames, "

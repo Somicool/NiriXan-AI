@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Body, HTTPException
 
-from . import face_enhance, faces_gallery
+from . import face_enhance, faces_gallery, gpu_lock
 
 router = APIRouter()
 
@@ -106,7 +106,24 @@ def enhance_face(saved_id: int, payload: dict = Body(default={})):
     facial evidence, rather than inventing a face.
 
     `force: true` re-runs the pipeline instead of serving the cached result."""
-    rec = face_enhance.enhance(int(saved_id), force=bool((payload or {}).get("force")))
+    try:
+        # The officer is waiting on this pass: background best-face prepare scans
+        # pause between frames while it runs instead of sharing the GPU with it.
+        # Scheduling only - enhancement itself is unchanged.
+        with gpu_lock.hold(priority=True):
+            rec = face_enhance.enhance(int(saved_id), force=bool((payload or {}).get("force")))
+    except Exception as exc:
+        # An unhandled exception here (e.g. a CUDA out-of-memory under VRAM
+        # pressure from other models loaded in the same process) used to surface
+        # as a bare 500 with no JSON body. The frontend's error handling already
+        # tolerates that shape, but a clear reason is far more useful than a
+        # silent failure when the officer is staring at a stuck "Analysing..."
+        # button for a minute.
+        raise HTTPException(status_code=503, detail={
+            "error": "Enhancement failed unexpectedly - the GPU may be busy with "
+                     "another request. Please try again.",
+            "reason": f"{type(exc).__name__}: {exc}",
+        }) from exc
     if rec.get("error"):
         status = 404 if "not found" in rec["error"].lower() else 422
         raise HTTPException(status_code=status, detail=rec)
