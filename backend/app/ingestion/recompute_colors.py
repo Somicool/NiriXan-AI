@@ -33,7 +33,8 @@ def _color_of(emb, region, which: str):
 
 def recompute_colors(video_id=None, job_id=None, batch: int = 128) -> dict:
     ph = ",".join("?" * len(_PERSON_LABELS))
-    q = f"SELECT detection_id, crop_path, attributes FROM detections WHERE class_label IN ({ph})"
+    q = (f"SELECT detection_id, video_id, crop_path, attributes FROM detections "
+         f"WHERE class_label IN ({ph})")
     params = list(_PERSON_LABELS)
     if video_id is not None:
         q += " AND video_id=?"
@@ -42,6 +43,7 @@ def recompute_colors(video_id=None, job_id=None, batch: int = 128) -> dict:
         rows = [dict(r) for r in conn.execute(q, params).fetchall()]
 
     total, updated = len(rows), 0
+    colorless_ids = database.colorless_video_ids()
     for i in range(0, total, batch):
         chunk = rows[i:i + batch]
         uppers, lowers, keep = [], [], []
@@ -49,6 +51,21 @@ def recompute_colors(video_id=None, job_id=None, batch: int = 128) -> dict:
             cp = r.get("crop_path")
             img = cv2.imread(cp) if cp and os.path.exists(cp) else None
             if img is None or not img.size:
+                continue
+            if r.get("video_id") in colorless_ids:
+                # Night-vision / B&W clip: black/white/unknown only, same reading
+                # as ingestion, so a recompute can never reintroduce a hue.
+                uc, ucs, lc, lcs = ax.bw_person_colors(img)
+                try:
+                    attrs = json.loads(r["attributes"]) if r["attributes"] else {}
+                except (TypeError, ValueError):
+                    attrs = {}
+                attrs.update(upper_color=uc, upper_color_score=ucs, lower_color=lc,
+                             lower_color_score=lcs, color_mode="bw")
+                with database.get_conn() as conn:
+                    conn.execute("UPDATE detections SET attributes=? WHERE detection_id=?",
+                                 (json.dumps(attrs), r["detection_id"]))
+                updated += 1
                 continue
             h = img.shape[0]
             cut = max(1, int(round(0.40 * h)))
