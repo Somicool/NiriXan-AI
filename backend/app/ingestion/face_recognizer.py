@@ -12,16 +12,36 @@ import cv2
 
 from .. import config
 
+import threading
+
 _app = None
+# Save Face, the background prepare scan and the startup warm-up can all reach
+# this first; without a lock two threads each built (and held) a full copy.
+_app_lock = threading.Lock()
 
 
 def get_face_app():
+    global _app
+    if _app is not None:
+        return _app
+    with _app_lock:
+        return _load_face_app()
+
+
+def _load_face_app():
     global _app
     if _app is None:
         from insightface.app import FaceAnalysis
         providers = (["CUDAExecutionProvider", "CPUExecutionProvider"]
                      if config.DEVICE == "cuda" else ["CPUExecutionProvider"])
-        _app = FaceAnalysis(name=config.FACE_MODEL, providers=providers)
+        # Only the three models whose outputs are used: detection (bbox, 5-point
+        # kps, det_score), recognition (embedding) and genderage. buffalo_l also
+        # ships 3D-68 and 2D-106 landmark models that ran on every face for
+        # nothing - no code reads their output. Verified on 36 real faces: bbox,
+        # kps, det_score, embedding, age and gender are identical without them,
+        # and per-face analysis is ~33% faster (41 -> 28 ms per crop).
+        _app = FaceAnalysis(name=config.FACE_MODEL, providers=providers,
+                            allowed_modules=["detection", "recognition", "genderage"])
         _app.prepare(ctx_id=0 if config.DEVICE == "cuda" else -1, det_size=(640, 640))
     return _app
 
